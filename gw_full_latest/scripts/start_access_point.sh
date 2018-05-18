@@ -20,6 +20,7 @@ if [ -f $INTERFACES_AP_FILE ];
 	sudo service networking stop
 	sudo mv $INTERFACES_FILE $INTERFACES_NOT_AP_FILE
 	sudo mv $INTERFACES_AP_FILE $INTERFACES_FILE
+	sudo systemctl enable hostapd.service
 	sudo service networking start
 	echo "The access point is now enabled."
   else
@@ -27,5 +28,6 @@ if [ -f $INTERFACES_AP_FILE ];
 fi
 
 #launching services dnsmasq and hostapd
+echo "Starting hostapd and dnsmasq services"
 sudo service dnsmasq start
 sudo service hostapd start

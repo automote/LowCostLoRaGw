@@ -47,6 +47,7 @@
  *****************************************************************************/
 
 // added by C. Pham
+// do not remove!
 #define W_REQUESTED_ACK
 //#define W_NET_KEY
 //#define W_INITIALIZATION
@@ -347,11 +348,12 @@ const uint8_t OFFSET_PAYLOADLENGTH = 4;
 const uint8_t OFFSET_RSSI = 139;
 const uint8_t NOISE_FIGURE = 6.0;
 const uint8_t NOISE_ABSOLUTE_ZERO = 174.0;
-const uint16_t MAX_TIMEOUT = 8000;		//8000 msec = 8.0 sec
+const uint16_t MAX_TIMEOUT = 10000;		//10000 msec = 10.0 sec
 const uint16_t MAX_WAIT = 12000;		//12000 msec = 12.0 sec
 const uint8_t MAX_RETRIES = 5;
 const uint8_t CORRECT_PACKET = 0;
 const uint8_t INCORRECT_PACKET = 1;
+const uint8_t INCORRECT_PACKET_TYPE = 2;
 
 // added by C. Pham
 // Packet type definition
@@ -365,7 +367,7 @@ const uint8_t INCORRECT_PACKET = 1;
 #define PKT_FLAG_ACK_REQ            0x08
 #define PKT_FLAG_DATA_ENCRYPTED     0x04
 #define PKT_FLAG_DATA_WAPPKEY       0x02
-#define PKT_FLAG_DATA_ISBINARY      0x01
+#define PKT_FLAG_DATA_DOWNLINK      0x01
 
 #define SX1272_ERROR_ACK        3
 #define SX1272_ERROR_TOA        4
@@ -410,7 +412,7 @@ struct pack
 	//! Structure Variable : Packet payload
 	/*!
  	*/
-	uint8_t data[MAX_PAYLOAD];
+    uint8_t* data;
 
     // modified by C. Pham
     // will not be used in the transmitted packet
@@ -1155,7 +1157,10 @@ public:
     void RxChainCalibration();
     uint8_t doCAD(uint8_t counter);
     uint16_t getToA(uint8_t pl);
-    void CarrierSense();
+    void CarrierSense(uint8_t cs=1);
+    void CarrierSense1();
+    void CarrierSense2();
+    void CarrierSense3();        
     int8_t setSyncWord(uint8_t sw);
     int8_t getSyncWord();
     int8_t setSleepMode();
@@ -1369,6 +1374,12 @@ public:
    	*/
 	pack ACK;
 
+    //! Structure Variable : Packet payload
+    /*!
+    */
+    uint8_t packet_data[MAX_PAYLOAD];
+    uint8_t ack_data[2];
+
 	//! Variable : temperature module.
 	//!
   	/*!
@@ -1383,10 +1394,10 @@ public:
 
 private:
 
-	void maxWrite16();
+    void maxWrite16();
 
-	char txbuf[2];
-	char rxbuf[2];
+    char txbuf[2];
+    char rxbuf[2];
 
     // added by C. Pham for ToA management
     //

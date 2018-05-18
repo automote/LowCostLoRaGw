@@ -30,6 +30,24 @@
 #include <math.h>
 
 /*  CHANGE LOGS by C. Pham
+ *  March 28th, 2018
+ *		- check at packet reception that the packet type is correct, otherwise discard the packet and returned error code is 5
+ *      - add max number of retries for CarrierSense
+ *  Feb 28th, 2018
+ *		- there is no longer is_binary flag, replaced by is_downlink flag
+ *		- the flags are then from left to right: ack_requested|encrypted|with_appkey|is_downlink
+ *  Feb 25th, 2018
+ *      - use shared payload buffer for packet_sent and packet_received
+ *      - use dedicated smaller buffer for ACK
+ *  Feb 13th, 2018
+ *      - fix bug in availableData() to set back the LoRa module into standby mode. This affected only some radio modules
+ *  November 10th, 2017
+ *		- change the way packet's RSSI is computed
+ *  November 7th, 2017
+ *      - CRC (RxPayloadCrcOn) is set back to OFF for the gateway
+ *      - bug fix in how the CRC is checked at receiver in getPacket() function
+ *  June, 22th, 2017
+ *      - setPowerDBM(uint8_t dbm) calls setPower('X') when dbm is set to 20
  *  Apr, 21th, 2017
  *      - change the way timeout are detected: exitTime=millis()+(unsigned long)wait; then millis() < exitTime;
  *  Mar, 26th, 2017
@@ -114,7 +132,7 @@ SX1272::SX1272()
     // added by C. Pham
     _defaultSyncWord=0x12;
     _rawFormat=false;
-    _extendedIFS=true;
+    _extendedIFS=false;
     _RSSIonSend=true;
     // disabled by default
     _enableCarrierSense=false;
@@ -135,7 +153,14 @@ SX1272::SX1272()
     _my_netkey[0] = net_key_0;
     _my_netkey[1] = net_key_1;
 #endif
-    _maxRetries = 3;
+    // we use the same memory area to reduce memory footprint
+    packet_sent.data=packet_data;
+    packet_received.data=packet_data;
+    // ACK packet has a very small separate memory area
+    ACK.data=ack_data;
+    // end
+    // modified by C. Pham
+    _maxRetries = 0;
     packet_sent.retry = _retries;
 };
     
@@ -241,7 +266,7 @@ uint8_t SX1272::ON()
 #endif
 
     // set LoRa mode
-    state = setLORA();
+    state = setLORA();   
 
     // Added by C. Pham for ToA computation
     getPreambleLength();
@@ -1717,8 +1742,8 @@ uint8_t	SX1272::setSF(uint8_t spr)
 {
     byte st0;
     int8_t state = 2;
-    byte config1;
-    byte config2;
+    byte config1=0;
+    byte config2=0;
 
 #if (SX1272_debug_mode > 1)
     printf("\n");
@@ -2712,7 +2737,8 @@ uint8_t SX1272::getPower()
     // get only the OutputPower
     _power = value & 0B00001111;
 
-    if( (value > -1) & (value < 16) )
+    //if( (value > -1) & (value < 16) )
+    if( _power < 16 )
     {
         state = 0;
 #if (SX1272_debug_mode > 1)
@@ -2893,7 +2919,7 @@ int8_t SX1272::setPowerNum(uint8_t pow)
         writeRegister(REG_OP_MODE, FSK_STANDBY_MODE);
     }
 
-    if ( (pow >= 0) & (pow < 15) )
+    if ( (pow >= 0) && (pow < 15) )
     {
         _power = pow;
     }
@@ -3440,14 +3466,15 @@ int16_t SX1272::getRSSIpacket()
                 // added by C. Pham, using Semtech SX1272 rev3 March 2015
                 // for SX1272 we use -139, for SX1276, we use -157
                 // then for SX1276 when using low-frequency (i.e. 433MHz) then we use -164
-                _RSSIpacket = -(OFFSET_RSSI+(_board==SX1276Chip?18:0)+(_channel<CH_04_868?7:0)) + (double)_RSSIpacket + (double)_rawSNR*0.25;
+                //_RSSIpacket = -(OFFSET_RSSI+(_board==SX1276Chip?18:0)+(_channel<CH_04_868?7:0)) + (double)_RSSIpacket + (double)_rawSNR*0.25;
+                _RSSIpacket = -(OFFSET_RSSI+(_board==SX1276Chip?18:0)+(_channel<CH_04_868?7:0)) + (double)_RSSIpacket + (double)_SNR*0.25;
                 state = 0;
             }
             else
             {
                 // commented by C. Pham
                 //_RSSIpacket = readRegister(REG_PKT_RSSI_VALUE);
-                _RSSIpacket = -(OFFSET_RSSI+(_board==SX1276Chip?18:0)+(_channel<CH_04_868?7:0)) + (double)_RSSIpacket;
+                _RSSIpacket = -(OFFSET_RSSI+(_board==SX1276Chip?18:0)+(_channel<CH_04_868?7:0)) + (double)_RSSIpacket*16.0/15.0;
                 //end
                 state = 0;
             }
@@ -3889,6 +3916,7 @@ uint8_t SX1272::receive()
 
     // Initializing packet_received struct
     memset( &packet_received, 0x00, sizeof(packet_received) );
+    packet_received.data=packet_data;
 
     // Setting Testmode
     // commented by C. Pham
@@ -3918,7 +3946,9 @@ uint8_t SX1272::receive()
     //end
 
     writeRegister(REG_FIFO_RX_BYTE_ADDR, 0x00); // Setting current value of reception buffer pointer
+    
     //clearFlags();						// Initializing flags
+    
     //state = 1;
     if( _modem == LORA )
     { // LoRa mode
@@ -3969,6 +3999,9 @@ uint8_t SX1272::receivePacketTimeout()
 /*
  Function: Configures the module to receive information.
  Returns: Integer that determines if there has been any error
+   state = 5  --> The packet header (packet type) has not been recognized
+   state = 4  --> The packet has been incorrectly received (CRC for instance)
+   state = 3  --> No packet has been received during the receive windows 
    state = 2  --> The command has not been executed
    state = 1  --> There has been an error while executing the command
    state = 0  --> The command has been executed with no errors
@@ -3995,6 +4028,9 @@ uint8_t SX1272::receivePacketTimeout(uint16_t wait)
         if( availableData(wait) )
         {
             state = getPacket();
+#if (SX1272_debug_mode > 0)
+	    printf("getPacket() gives state=%d\n", state);
+#endif	    
         }
         else
         {
@@ -4014,7 +4050,11 @@ uint8_t SX1272::receivePacketTimeout(uint16_t wait)
         {
             state_f = 4;  // The packet has been incorrectly received
         }
-        else
+        else if ( _reception == INCORRECT_PACKET_TYPE )
+        {
+            state_f = 5;  // The packet type has not been recognized
+        }
+        else        
         {
             state_f = 0;  // The packet has been correctly received
             // added by C. Pham
@@ -4432,19 +4472,21 @@ boolean	SX1272::availableData(uint16_t wait)
             printf("## Packet received is not for me ##\n");
             printf("\n");
 #endif
-            if( _modem == LORA )	// STANDBY PARA MINIMIZAR EL CONSUMO
-            { // LoRa mode
-                //writeRegister(REG_OP_MODE, LORA_STANDBY_MODE);	// Setting standby LoRa mode
-            }
-            else
-            { //  FSK mode
-                writeRegister(REG_OP_MODE, FSK_STANDBY_MODE);	// Setting standby FSK mode
-            }
         }
     }
-    //----else
-    //	{
-    //	}
+
+    // added by C. Pham
+    if (_hreceived==false || forme==false) {
+        if( _modem == LORA )	// STANDBY PARA MINIMIZAR EL CONSUMO
+        { // LoRa mode
+            writeRegister(REG_OP_MODE, LORA_STANDBY_MODE);	// Setting standby LoRa mode
+        }
+        else
+        { //  FSK mode
+            writeRegister(REG_OP_MODE, FSK_STANDBY_MODE);	// Setting standby FSK mode
+        }
+    }
+
     return forme;
 }
 
@@ -4498,6 +4540,7 @@ int8_t SX1272::getPacket(uint16_t wait)
 
     //previous = millis();
     exitTime = millis() + (unsigned long)wait;
+    
     if( _modem == LORA )
     { // LoRa mode
         value = readRegister(REG_IRQ_FLAGS);
@@ -4513,25 +4556,39 @@ int8_t SX1272::getPacket(uint16_t wait)
             //}
         } // end while (millis)
 
-        if( (bitRead(value, 6) == 1) && (bitRead(value, 5) == 0) )
-        { // packet received & CRC correct
-            p_received = true;	// packet correctly received
-            _reception = CORRECT_PACKET;
+        // modified by C. Pham
+        // RxDone
+        if ((bitRead(value, 6) == 1)) {
 #if (SX1272_debug_mode > 0)
-            printf("## Packet correctly received in LoRa mode ##\n");
+            printf("## Packet received in LoRa mode ##\n");
 #endif
-        }
-        else
-        {
-            if( bitRead(value, 5) != 0 )
-            { // CRC incorrect
-                _reception = INCORRECT_PACKET;
-                state = 3;
+            //CrcOnPayload?
+            if (bitRead(readRegister(REG_HOP_CHANNEL),6)) {
+
+                if ( (bitRead(value, 5) == 0) ) {
+                    // packet received & CRC correct
+                    p_received = true;	// packet correctly received
+                    _reception = CORRECT_PACKET;
 #if (SX1272_debug_mode > 0)
-                printf("** The CRC is incorrect **\n");
-                printf("\n");
+                    printf("** The CRC is correct **\n");
 #endif
+                }
+                else {
+                    _reception = INCORRECT_PACKET;
+                    state = 3;
+#if (SX1272_debug_mode > 0)
+                    printf("** The CRC is incorrect **\n");
+#endif
+                }
             }
+            else {
+                  // as CRC is not set we suppose that CRC is correct
+                  p_received = true;	// packet correctly received
+                  _reception = CORRECT_PACKET;
+#if (SX1272_debug_mode > 0)
+                  printf("## Packet supposed to be correct as CrcOnPayload is off at transmitter ##\n");
+#endif
+             }
         }
         writeRegister(REG_OP_MODE, LORA_STANDBY_MODE);	// Setting standby LoRa mode
     }
@@ -4578,6 +4635,7 @@ int8_t SX1272::getPacket(uint16_t wait)
         }
         writeRegister(REG_OP_MODE, FSK_STANDBY_MODE);	// Setting standby FSK mode
     }
+    
     if( p_received )
     {
         // Store the packet
@@ -4613,9 +4671,20 @@ int8_t SX1272::getPacket(uint16_t wait)
         // modified by C. Pham
         if (!_rawFormat) {
             packet_received.type = readRegister(REG_FIFO);		// Reading second byte of the received packet
-            packet_received.src = readRegister(REG_FIFO);		// Reading second byte of the received packet
-            packet_received.packnum = readRegister(REG_FIFO);	// Reading third byte of the received packet
-            //packet_received.length = readRegister(REG_FIFO);	// Reading fourth byte of the received packet
+            
+            // check packet type to discard unknown packet type
+            if ( ((packet_received.type & PKT_TYPE_MASK) != PKT_TYPE_DATA) && ((packet_received.type & PKT_TYPE_MASK) != PKT_TYPE_ACK) ) {
+                _reception = INCORRECT_PACKET_TYPE;
+                state = 3;
+#if (SX1272_debug_mode > 0)
+                printf("** The packet type is incorrect **\n");
+#endif	
+            }    
+            else {          
+            	packet_received.src = readRegister(REG_FIFO);		// Reading second byte of the received packet
+            	packet_received.packnum = readRegister(REG_FIFO);	// Reading third byte of the received packet
+            	//packet_received.length = readRegister(REG_FIFO);	// Reading fourth byte of the received packet
+            }
         }
         else {
             packet_received.type = 0;
@@ -4623,71 +4692,76 @@ int8_t SX1272::getPacket(uint16_t wait)
             packet_received.packnum = 0;
         }
 
-        packet_received.length = readRegister(REG_RX_NB_BYTES);
+		if (_reception == CORRECT_PACKET) {
+		
+        	packet_received.length = readRegister(REG_RX_NB_BYTES);
 
-        if( _modem == LORA )
-        {
-            if (_rawFormat) {
-                _payloadlength=packet_received.length;
-            }
-            else
-                _payloadlength = packet_received.length - OFFSET_PAYLOADLENGTH;
-        }
-        if( packet_received.length > (MAX_LENGTH + 1) )
-        {
+        	if( _modem == LORA )
+			{
+				if (_rawFormat) {
+					_payloadlength=packet_received.length;
+				}
+				else
+					_payloadlength = packet_received.length - OFFSET_PAYLOADLENGTH;
+			}
+			if( packet_received.length > (MAX_LENGTH + 1) )
+			{
 #if (SX1272_debug_mode > 0)
-            printf("Corrupted packet, length must be less than 256\n");
+            	printf("Corrupted packet, length must be less than 256\n");
 #endif
-        }
-        else
-        {
-            for(unsigned int i = 0; i < _payloadlength; i++)
-            {
-                packet_received.data[i] = readRegister(REG_FIFO); // Storing payload
-            }
+			}
+			else
+			{
+				for(unsigned int i = 0; i < _payloadlength; i++)
+				{
+					packet_received.data[i] = readRegister(REG_FIFO); // Storing payload
+				}
 
-            // commented by C. Pham
-            //packet_received.retry = readRegister(REG_FIFO);
+				// commented by C. Pham
+				//packet_received.retry = readRegister(REG_FIFO);
 
-            // Print the packet if debug_mode
+				// Print the packet if debug_mode
 #if (SX1272_debug_mode > 0)
-            printf("## Packet received:\n");
-            printf("Destination: ");
-            printf("%d\n", packet_received.dst);			 	// Printing destination
-            printf("Source: ");
-            printf("%d\n", packet_received.src);			 	// Printing source
-            printf("Packet number: ");
-            printf("%d\n", packet_received.packnum);			// Printing packet number
-            printf("Packet length: ");
-            printf("%d\n", packet_received.length);			// Printing packet length
-            printf("Data: ");
-            for(unsigned int i = 0; i < _payloadlength; i++)
-            {
-                printf("%c", packet_received.data[i]);		// Printing payload
-            }
-            printf("\n");
-            printf("Retry number: ");
-            printf("%d\n", packet_received.retry);			// Printing number retry
-            printf(" ##\n");
-            printf("\n");
+				printf("## Packet received:\n");
+				printf("Destination: ");
+				printf("%d\n", packet_received.dst);			 	// Printing destination
+				printf("Type: ");
+				printf("%d\n", packet_received.type);			 	// Printing type    
+				printf("Source: ");
+				printf("%d\n", packet_received.src);			 	// Printing source
+				printf("Packet number: ");
+				printf("%d\n", packet_received.packnum);			// Printing packet number
+				printf("Packet length: ");
+				printf("%d\n", packet_received.length);			// Printing packet length
+				printf("Data: ");
+				for(unsigned int i = 0; i < _payloadlength; i++)
+				{
+					printf("%c", packet_received.data[i]);		// Printing payload
+				}
+				printf("\n");
+				//printf("Retry number: ");
+				//printf("%d\n", packet_received.retry);			// Printing number retry
+				printf(" ##\n");
+				printf("\n");
 #endif
-            state = 0;
+            	state = 0;
 
 #ifdef W_REQUESTED_ACK
-            // added by C. Pham
-            // need to send an ACK
-            if (packet_received.type & PKT_FLAG_ACK_REQ) {
-                state = 5;
-                _requestACK_indicator=1;
-            }
-            else
-                _requestACK_indicator=0;
+				// added by C. Pham
+				// need to send an ACK
+				if (packet_received.type & PKT_FLAG_ACK_REQ) {
+					state = 5;
+					_requestACK_indicator=1;
+				}
+				else
+					_requestACK_indicator=0;
 #endif
+        	}
         }
     }
     else
     {
-        state = 1;
+        //state = 1;
         if( (_reception == INCORRECT_PACKET) && (_retries < _maxRetries) )
         {
             _retries++;
@@ -4697,11 +4771,14 @@ int8_t SX1272::getPacket(uint16_t wait)
 #endif
         }
     }
+    
     if( _modem == LORA )
     {
         writeRegister(REG_FIFO_ADDR_PTR, 0x00);  // Setting address pointer in FIFO data buffer
     }
+    
     clearFlags();	// Initializing flags
+
     if( wait > MAX_WAIT )
     {
         state = -1;
@@ -6587,16 +6664,34 @@ uint16_t SX1272::getToA(uint8_t pl) {
     return ceil(airTime/1000)+1;
 }
 
+
+void SX1272::CarrierSense(uint8_t cs) {
+    
+    if (cs==1)
+    	CarrierSense1();
+    
+    if (cs==2)
+    	CarrierSense2(); 
+    	
+    if (cs==3)
+    	CarrierSense3();     	
+}    	  	   	
+
 // need to set _send_cad_number to a value > 0
 // we advise using _send_cad_number=3 for a SIFS and _send_cad_number=9 for a DIFS
 // prior to send any data
-void SX1272::CarrierSense() {
+void SX1272::CarrierSense1() {
 
     int e;
     bool carrierSenseRetry=false;
+    uint8_t retries=3;
+    uint8_t DIFSretries=8;
 
+    printf("--> CS1\n");
+  	    
     if (_send_cad_number && _enableCarrierSense) {
         do {
+            DIFSretries=8;
             do {
 
                 // check for free channel (SIFS/DIFS)
@@ -6604,7 +6699,7 @@ void SX1272::CarrierSense() {
                 e = doCAD(_send_cad_number);
                 _endDoCad=millis();
 
-                printf("--> CAD duration ");
+                printf("--> CAD ");
                 printf("%d\n", _endDoCad-_startDoCad);
 
                 if (!e) {
@@ -6614,7 +6709,7 @@ void SX1272::CarrierSense() {
                         // wait for random number of CAD
                         uint8_t w = rand() % 8 + 1;
 
-                        printf("--> waiting for ");
+                        printf("--> wait for ");
                         printf("%d",w);
                         printf(" CAD = ");
                         printf("%d\n",sx1272_CAD_value[_loraMode]*w);
@@ -6626,24 +6721,24 @@ void SX1272::CarrierSense() {
                         e = doCAD(_send_cad_number);
                         _endDoCad=millis();
 
-                        printf("--> CAD duration ");
+                        printf("--> CAD ");
                         printf("%d\n", _endDoCad-_startDoCad);
 
                         if (!e)
                             printf("OK2\n");
                         else
-                            printf("###2\n");
+                            printf("#2\n");
                     }
                 }
                 else {
-                    printf("###1\n");
+                    printf("#1\n");
 
                     // wait for random number of DIFS
                     uint8_t w = rand() % 8 + 1;
 
-                    printf("--> waiting for ");
+                    printf("--> wait for ");
                     printf("%d",w);
-                    printf(" DIFS (DIFS=3SIFS) = ");
+                    printf(" DIFS=3SIFS= ");
                     printf("%d\n",sx1272_SIFS_value[_loraMode]*3*w);
 
                     delay(sx1272_SIFS_value[_loraMode]*3*w);
@@ -6651,28 +6746,23 @@ void SX1272::CarrierSense() {
                     printf("--> retry\n");
                 }
 
-            } while (e);
+            } while (e && --DIFSretries);
 
             // CAD is OK, but need to check RSSI
             if (_RSSIonSend) {
 
                 e=getRSSI();
-
-                uint8_t rssi_retry_count=10;
+                uint8_t rssi_retry_count=8;
 
                 if (!e) {
 
-                    printf("--> RSSI ");
-                    printf("%d\n",_RSSI);
-
-                    while (_RSSI > -90 && rssi_retry_count) {
-
-                        delay(1);
+                     do {
                         getRSSI();
                         printf("--> RSSI ");
                         printf("%d\n",_RSSI);
                         rssi_retry_count--;
-                    }
+                        delay(1);
+                    } while (_RSSI > -90 && rssi_retry_count);
                 }
                 else
                     printf("--> RSSI error\n");
@@ -6683,8 +6773,250 @@ void SX1272::CarrierSense() {
                     carrierSenseRetry=false;
             }
 
-        } while (carrierSenseRetry);
+        } while (carrierSenseRetry && --retries);
     }
+}
+
+void SX1272::CarrierSense2() {
+
+  int e;
+  bool carrierSenseRetry=false;  
+  uint8_t foundBusyDuringDIFSafterBusyState=0;
+  uint8_t retries=3;
+  uint8_t DIFSretries=8;
+  uint8_t n_collision=0;
+  // upper bound of the random backoff timer
+  uint8_t W=2;
+  uint32_t max_toa = sx1272.getToA(MAX_LENGTH);
+  
+  //CAD for DIFS=9CAD
+  printf("--> CS2\n");
+  
+  if (_send_cad_number && _enableCarrierSense) {
+    do { 
+      DIFSretries=8;
+      do {
+        //D f W
+        //2 2 4
+        //3 3 8
+        //4 4 16
+        //5 5 16
+        //6 6 16
+        //...
+        
+        if (foundBusyDuringDIFSafterBusyState>1 && foundBusyDuringDIFSafterBusyState<5)
+          W=W*2;
+                
+        // check for free channel (SIFS/DIFS)        
+        _startDoCad=millis();
+        e = sx1272.doCAD(_send_cad_number);
+        _endDoCad=millis();
+        
+        printf("--> DIFS ");
+        printf("%ld\n",_endDoCad-_startDoCad);
+
+        // successull SIFS/DIFS
+        if (!e) {
+          
+          // previous collision detected
+          if (n_collision) {
+                
+              printf("--> count for ");
+              // count for random number of CAD/SIFS/DIFS?   
+              // SIFS=3CAD
+              // DIFS=9CAD
+              uint8_t w = rand() % (W*_send_cad_number) + 1;            
+
+              printf("%d\n", w);             
+
+              int busyCount=0;
+              bool nowBusy=false;
+              
+              do {
+
+                  if (nowBusy)
+                    e = sx1272.doCAD(_send_cad_number);
+                  else
+                    e = sx1272.doCAD(1);
+
+                  if (nowBusy && e) {
+                    printf("#");
+                    busyCount++;                    
+                  }
+                  else
+                  if (nowBusy && !e) {
+                    printf("|");
+                    nowBusy=false;                    
+                  }                  
+                  else
+                  if (!e) {
+                    w--;
+                    printf("-");
+                  }  
+                  else {
+                    printf("*");
+                    nowBusy=true;
+                    busyCount++;  
+                  }
+                  
+              } while (w);      
+
+              // if w==0 then we exit and 
+              // the packet will be sent  
+              printf("\n--> found busy during ");
+              printf("%d\n", busyCount);
+          }
+          else {
+              printf("OK1\n");
+              
+              if (_extendedIFS)  {          
+                // wait for random number of CAD         
+                uint8_t w = rand() % 8 + 1;
+    
+                printf("--> extended wait for ");
+                printf("%d\n",w);
+                printf(" CAD = ");
+                printf("%d\n",sx1272_CAD_value[_loraMode]*w);
+                
+                delay(sx1272_CAD_value[_loraMode]*w);
+                
+                // check for free channel (SIFS/DIFS) once again
+                _startDoCad=millis();
+                e = sx1272.doCAD(_send_cad_number);
+                _endDoCad=millis();
+     
+                printf("--> CAD ");
+                printf("%ld\n",_endDoCad-_startDoCad);
+            
+                if (!e)
+                  printf("OK2\n");            
+                else
+                  printf("#2\n");
+              }          
+          }    
+        }
+        else {
+          n_collision++;
+          foundBusyDuringDIFSafterBusyState++;          
+          printf("###");  
+          printf("%d\n",n_collision);
+          
+          printf("--> CAD until clear\n");
+
+          int busyCount=0;
+              
+          _startDoCad=millis();
+          do {
+            
+            e = sx1272.doCAD(1);
+
+            if (e) {
+                printf("R");
+                busyCount++;              
+            }
+                         
+          } while (e && (millis()-_startDoCad < 2*max_toa));
+
+          _endDoCad=millis();
+
+          printf("\n--> found busy during ");
+          printf("%d\n", busyCount);
+                        
+          printf("--> wait duration ");
+          printf("%ld\n",_endDoCad-_startDoCad);
+
+          // to perform a new DIFS
+          printf("--> retry\n");
+          e=1;
+        }
+
+      } while (e && --DIFSretries);
+    
+      // CAD is OK, but need to check RSSI
+      if (_RSSIonSend) {
+
+          e=getRSSI();
+          uint8_t rssi_retry_count=8;
+
+          if (!e) {
+
+               do {
+                  getRSSI();
+                  printf("--> RSSI ");
+                  printf("%d\n",_RSSI);
+                  rssi_retry_count--;
+                  delay(1);
+              } while (_RSSI > -90 && rssi_retry_count);
+          }
+          else
+              printf("--> RSSI error\n");
+        
+          if (!rssi_retry_count)
+            carrierSenseRetry=true;  
+          else
+            carrierSenseRetry=false;
+      }
+      
+    } while (carrierSenseRetry && --retries);
+  }
+}
+
+void SX1272::CarrierSense3() {
+
+  int e;
+  bool carrierSenseRetry=false;
+  uint8_t n_collision=0;
+  uint8_t retries=3;
+  uint8_t n_cad=9;
+  
+  uint32_t max_toa = sx1272.getToA(MAX_LENGTH);
+  
+  //unsigned long end_carrier_sense=0;
+  
+  if (_send_cad_number && _enableCarrierSense) {
+    do { 
+
+      printf("--> CAD for MaxToa=");
+      printf("%ld\n", max_toa);
+        
+      //end_carrier_sense=millis()+(max_toa/n_cad)*(n_cad-1);
+      
+      for (int i=0; i<n_cad; i++) {      
+        _startDoCad=millis();
+        e = sx1272.doCAD(1);
+        _endDoCad=millis();
+
+        if (!e) {
+          printf("%ld", _endDoCad);
+          printf(" 0 ");
+          printf("%d\n", sx1272._RSSI);
+          printf(" ");
+          printf("%ld\n", _endDoCad-_startDoCad);
+        }
+        else
+          continue;
+          
+        // wait in order to have n_cad CAD operations during max_toa
+        delay(max_toa/(n_cad-1)-(millis()-_startDoCad));
+      }
+
+      if (e) {
+        n_collision++;
+        printf("###");
+        printf("%d\n",n_collision);
+
+        printf("Channel busy. Wait for MaxToA=");
+        printf("%ld\n", max_toa);
+        delay(max_toa);
+        // to perform a new max_toa waiting
+        printf("--> retry\n");
+        carrierSenseRetry=true;
+      }
+      else
+        carrierSenseRetry=false;
+      
+    } while (carrierSenseRetry && --retries);
+  }
 }
 
 /*
@@ -6836,11 +7168,15 @@ int8_t SX1272::setPowerDBM(uint8_t dbm) {
         writeRegister(REG_OP_MODE, FSK_STANDBY_MODE);
     }
 
+	if (dbm == 20) {
+		return setPower('X');
+	}
+	
     if (dbm > 14)
         return state;
-
-    // disable high power output in all other cases
-    writeRegister(RegPaDacReg, 0x84);
+       	
+	// disable high power output in all other cases
+	writeRegister(RegPaDacReg, 0x84);
 
     if (dbm > 10)
         // set RegOcp for OcpOn and OcpTrim

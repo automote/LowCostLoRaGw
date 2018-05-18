@@ -22,15 +22,10 @@
 #------------------------------------------------------------
 
 
-#provide to the script the last 5 hex number of your eth0 interface, i.e. 27EBBEDA21 
 #
-# example: ./config_raspbian.sh 27EBBEDA21
+# example: ./config_gw.sh
 
-if [ "$#" -ne 1 ]
-  then
-    echo "Usage: $0 last_fixe_hex_byte_of_eth0_iface"
-    exit
-fi
+cd /home/pi/lora_gateway/scripts
 
 board=`cat /proc/cpuinfo | grep "Revision" | cut -d ':' -f 2 | tr -d " \t\n\r"`
 
@@ -42,62 +37,155 @@ read ouinon
 if [ "$ouinon" = "y" ] || [ "$ouinon" = "Y" ]
 	then
 		cd ..
-		if [ "$board" = "a01041" ] || [ "$board" = "a21041" ]
+		
+		downlink=`jq ".gateway_conf.downlink" gateway_conf.json`
+ 
+		if [ "$downlink" != "0" ]
+		then
+			echo "Detecting downlink timer, will compile with downlink support"
+		fi	
+		
+		if [ "$board" = "a01041" ] || [ "$board" = "a21041" ] || [ "$board" = "a22042" ]
 			then
 				echo "You have a Raspberry 2"
 				echo "Compiling for Raspberry 2 and 3"
-				make lora_gateway_pi2
+				if [ "$downlink" = "0" ]
+					then 
+						make lora_gateway_pi2
+					else
+						make lora_gateway_pi2_downlink 
+				fi		
 		elif [ "$board" = "a02082" ] || [ "$board" = "a22082" ]
 			then
 				echo "You have a Raspberry 3"
 				echo "Compiling for Raspberry 2 and 3"
-				make lora_gateway_pi2
+				if [ "$downlink" = "0" ]
+					then 
+						make lora_gateway_pi2
+					else
+						make lora_gateway_pi2_downlink 
+				fi	
+		elif [ "$board" = "900092" ] || [ "$board" = "900093" ]
+			then
+				echo "You have a Raspberry Zero"
+				echo "Compiling for Raspberry Zero (same as Raspberry 1)"
+				if [ "$downlink" = "0" ]
+					then 
+						make lora_gateway
+					else
+						make lora_gateway_downlink 
+				fi	
+		elif [ "$board" = "9000c1" ]
+			then
+				echo "You have a Raspberry Zero W"
+				echo "Compiling for Raspberry Zero W (same as Raspberry 1)"
+				if [ "$downlink" = "0" ]
+					then 
+						make lora_gateway
+					else
+						make lora_gateway_downlink 
+				fi	
 		else
 			echo "You have a Raspberry 1"		
 			echo "Compiling for Raspberry 1"
-			make lora_gateway
-		fi
+			if [ "$downlink" = "0" ]
+				then 
+					make lora_gateway
+				else
+					make lora_gateway_downlink 
+			fi	
+		fi		
+		
 		cd scripts
 fi
 
-echo "Creating ../gateway_id.txt file"
-echo "Writing 000000$1"
-echo "000000$1" > ../gateway_id.txt
+if [ $# == 1 ]
+then
+	echo "Taking provided address: $1"
+	gwid="$1"
+else	
+
+	#get the last 5 bytes of the eth0 MAC addr
+	gwid=`ifconfig | grep 'eth0' | awk '{print $NF}' | sed 's/://g' | awk '{ print toupper($1) }' | cut -c 3-`
+
+	#get the last 5 bytes of the wlan0 MAC addr
+	if [ "$gwid" = "" ]
+		then
+			gwid=`ifconfig | grep 'wlan0' | awk '{print $NF}' | sed 's/://g' | awk '{ print toupper($1) }' | cut -c 3-`
+			
+			#it means that the wlan0 interface works in access point mode or has no IP address assigned
+			#so get the address from the ether field
+			if [ "$gwid" = "00" ]
+			then
+				gwid=`ifconfig | grep 'ether' | awk '{print $2}' | sed 's/://g' | awk '{ print toupper($1) }' | cut -c 3-`
+			fi
+	fi
+
+	#set a default value
+	if [ "$gwid" = "" ]
+		then
+			gwid="XXXXXXDEF0"
+	fi
+fi
+
+echo "Keep a copy of /home/pi/lora_gateway/scripts/update_gw.sh"
+mkdir /home/pi/scripts
+cp /home/pi/lora_gateway/scripts/update_gw.sh /home/pi/scripts
 echo "Done"
 
-echo "Replacing gw id in ../gateway_conf.json"
-sed -i -- 's/"000000.*"/"000000'"$1"'"/g' ../gateway_conf.json
+echo "Creating /home/pi/lora_gateway/gateway_id.txt file"
+echo "Writing 000000$gwid"
+echo "000000$gwid" > /home/pi/lora_gateway/gateway_id.txt
 echo "Done"
 
-if [ ! -d ~/Dropbox/LoRa-test ]
+echo "Creating /home/pi/lora_gateway/gateway_id.md5 file"
+tr -d '\n' < /home/pi/lora_gateway/gateway_id.txt | md5sum - | cut -d ' ' --field=1 > /home/pi/lora_gateway/gateway_id.md5
+#the version below actually takes the \n at the end of the gw id which is not what we want, thus the version above
+#md5sum /home/pi/lora_gateway/gateway_id.txt | cut -d ' ' --field=1 > /home/pi/lora_gateway/gateway_id.md5
+echo "Done"
+
+echo "Replacing gw id in /home/pi/lora_gateway/gateway_conf.json"
+sed -i -- 's/"000000.*"/"000000'"$gwid"'"/g' /home/pi/lora_gateway/gateway_conf.json
+echo "Done"
+
+if [ ! -d /home/pi/Dropbox/LoRa-test ]
 	then
-		echo "*****************************************************"
-		echo "*** create ~/Dropbox/LoRa-test (recommended) Y/N  ***"
-		echo "*****************************************************"
+		echo "************************************************************"
+		echo "*** create /home/pi/Dropbox/LoRa-test (recommended) Y/N  ***"
+		echo "************************************************************"
 		read ouinon
 
 		if [ "$ouinon" = "y" ] || [ "$ouinon" = "Y" ]
 			then
-				echo "Creating ~/Dropbox/LoRa-test"
-				mkdir -p ~/Dropbox/LoRa-test
+				echo "Creating /home/pi/Dropbox/LoRa-test"
+				mkdir -p /home/pi/Dropbox/LoRa-test
 				echo "Done"
 		fi
 	else
-		echo "~/Dropbox/LoRa-test already exist. OK."
+		echo "/home/pi/Dropbox/LoRa-test already exist. OK."
 fi
 				
-echo "********************************************************"
-echo "*** create log symb link to ~/Dropbox/LoRa-test Y/N  ***"
-echo "********************************************************"
+echo "***************************************************************"
+echo "*** create log symb link to /home/pi/Dropbox/LoRa-test Y/N  ***"
+echo "***************************************************************"
 read ouinon
 
 if [ "$ouinon" = "y" ] || [ "$ouinon" = "Y" ]
 	then
-		echo "Creating log -> ~/Dropbox/LoRa-test"
-		ln -s ~/Dropbox/LoRa-test ../log
+		rm /home/pi/lora_gateway/log
+		echo "Creating log -> /home/pi/Dropbox/LoRa-test"
+		ln -s /home/pi/Dropbox/LoRa-test /home/pi/lora_gateway/log
 		echo "Done"		
 fi	
-	
+
+echo "***********************************"
+if [ -f /etc/hostapd/custom_ssid.txt ];
+then
+	echo "Customized hot-spot ssid detected: `cat /etc/hostapd/custom_ssid.txt`"
+	echo "Configuring hostapd.conf will replace with WAZIUP_PI_GW_$gwid"
+	echo "Password will also be reset to loragateway"		
+fi
+
 echo "***********************************"
 echo "*** configure hostapd.conf Y/N  ***"
 echo "***********************************"
@@ -106,9 +194,9 @@ read ouinon
 if [ "$ouinon" = "y" ] || [ "$ouinon" = "Y" ]
 	then
 		echo "Replacing hot-spot ssid in /etc/hostapd/hostapd.conf"
-		sudo sed -i 's/^ssid.*/ssid=WAZIUP_PI_GW_'"$1"'/g' /etc/hostapd/hostapd.conf
+		sudo sed -i 's/^ssid.*/ssid=WAZIUP_PI_GW_'"$gwid"'/g' /etc/hostapd/hostapd.conf
 		echo "Done"
-		echo "Gateway WiFi ssid is WAZIUP_PI_GW_$1"
+		echo "Gateway WiFi ssid is WAZIUP_PI_GW_$gwid"
 		
 		echo "Setting wpa_passphrase in /etc/hostapd/hostapd.conf"
 		sudo sed -i 's/^wpa_passphrase.*/wpa_passphrase=loragateway/g' /etc/hostapd/hostapd.conf
@@ -122,7 +210,10 @@ if [ "$ouinon" = "y" ] || [ "$ouinon" = "Y" ]
 		read ouinon
 
 		if [ "$ouinon" = "y" ] || [ "$ouinon" = "Y" ]
-			then			
+			then
+				echo "Removing /etc/hostapd/custom_ssid.txt if any"
+				sudo rm -rf /etc/hostapd/custom_ssid.txt
+				echo "Done"			
 				echo "Indicating in /etc/default/hostapd that /etc/hostapd/hostapd.conf is the config file"
 				# here we replace #DAEMON_CONF to DAEMON_CONF in case DAEMON_CONF was commented
 				sudo sed -i 's/^#DAEMON_CONF.*/DAEMON_CONF="/etc/hostapd/hostapd.conf"/g' /etc/default/hostapd
@@ -135,6 +226,7 @@ if [ "$ouinon" = "y" ] || [ "$ouinon" = "Y" ]
 				echo "Add in /etc/dnsmasq.conf DHCP lease IP range, the RPI acces-point will have IP 192.168.200.1"
 				echo "interface=wlan0" >>  /etc/dnsmasq.conf
 				echo "dhcp-range=192.168.200.100,192.168.200.120,255.255.255.0,1h" >>  /etc/dnsmasq.conf
+				echo "Done"
 		fi
 
 fi
@@ -152,11 +244,11 @@ if [ "$ouinon" = "y" ] || [ "$ouinon" = "Y" ]
 		echo "Done"
 		echo "Renaming Bluetooth network name in /etc/bluetooth/main.conf"
 		# here we replace #Name to Name in case Name was commented
-		sudo sed -i 's/^#Name *=.*/Name=WAZIUP_PI_BT_GW_'"$1"'/g' /etc/bluetooth/main.conf
+		sudo sed -i 's/^#Name *=.*/Name=WAZIUP_PI_BT_GW_'"$gwid"'/g' /etc/bluetooth/main.conf
 		# then in all cases we replace Name so that if we already have an uncommented Name it will also work
-		sudo sed -i 's/^Name *=.*/Name=WAZIUP_PI_BT_GW_'"$1"'/g' /etc/bluetooth/main.conf
+		sudo sed -i 's/^Name *=.*/Name=WAZIUP_PI_BT_GW_'"$gwid"'/g' /etc/bluetooth/main.conf
 		echo "Done"
-		echo "Gateway Bluetooth network name is WAZIUP_PI_BT_GW_$1"
+		echo "Gateway Bluetooth network name is WAZIUP_PI_BT_GW_$gwid"
 fi
 
 ## TODO: /lib/systemd/system/bluetooth.service
@@ -169,14 +261,14 @@ read ouinon
 if [ "$ouinon" = "y" ] || [ "$ouinon" = "Y" ]
 	then
 		echo "Compiling the DHT22 library"
-		cd ../sensors_in_raspi
+		cd /home/pi/lora_gateway/sensors_in_raspi
 		cd PIGPIO
 		make -j4
 		echo "Done"
 		echo "Installing the DHT22 library"
 		sudo make install
 		echo "Done"
-		cd ../../scripts
+		
 		echo "Change in gateway_conf.json the value in seconds between 2 readings."
 		echo "--> \"dht22\" : 3600"
 		echo "for one reading every hour. Set to 0 to disable DHT reading."
@@ -188,14 +280,14 @@ if [ "$ouinon" = "y" ] || [ "$ouinon" = "Y" ]
 			then
 				echo "Editing gateway_conf.json. CTRL-O to save, CTRL-X to return. Press any key to start editing."
 				read k 
-				nano ../gateway_conf.json	
+				nano /home/pi/lora_gateway/gateway_conf.json	
 		fi			
 		
 fi
 
 echo ""
 echo "Current status for DHT22 MongoDB is:"
-grep "dht22_mongo" ../gateway_conf.json
+grep "dht22_mongo" /home/pi/lora_gateway/gateway_conf.json
 echo ""
 echo "*************************************"
 echo "*** activate DHT22 MongoDB Y/N/Q  ***"
@@ -205,14 +297,14 @@ read ouinon
 if [ "$ouinon" = "y" ] || [ "$ouinon" = "Y" ]
 	then
 		echo "Activating DHT22 MongoDB in gateway_conf.json"
-		sed -i 's/"dht22_mongo".*:.*false/"dht22_mongo" : true/g' ../gateway_conf.json
+		sed -i 's/"dht22_mongo".*:.*false/"dht22_mongo" : true/g' /home/pi/lora_gateway/gateway_conf.json
 		echo "Done"
 fi
 
 if [ "$ouinon" = "n" ] || [ "$ouinon" = "N" ]
 	then
 		echo "Deactivating DHT22 MongoDB in gateway_conf.json"
-		sed -i 's/"dht22_mongo".*:.*true/"dht22_mongo" : false/g' ../gateway_conf.json
+		sed -i 's/"dht22_mongo".*:.*true/"dht22_mongo" : false/g' /home/pi/lora_gateway/gateway_conf.json
 		echo "Done"
 fi
 
@@ -226,7 +318,7 @@ if [ "$ouinon" = "y" ] || [ "$ouinon" = "Y" ]
 		echo "INSTRUCTIONS: set the local gateway MongoDB cloud enabled field to true or false."
 		echo "Editing clouds.json. CTRL-O to save, CTRL-X to return. Press any key to start editing."
 		read k 
-		nano ../clouds.json
+		nano /home/pi/lora_gateway/clouds.json
 fi
 
 if [ "$ouinon" = "n" ] || [ "$ouinon" = "N" ]
@@ -241,7 +333,7 @@ read ouinon
 
 # we always remove so that there will be no duplicate lines
 echo "Removing /home/pi/lora_gateway/scripts/start_gw.sh in /etc/rc.local if any"
-sudo sed -i 's/\/home\/pi\/lora_gateway\/scripts\/start_gw.sh//g' /etc/rc.local
+sudo sed -i '\/home\/pi\/lora_gateway\/scripts\/start_gw.sh/d' /etc/rc.local
 echo "Done"
 
 if [ "$ouinon" = "y" ] || [ "$ouinon" = "Y" ]
@@ -259,17 +351,17 @@ read ouinon
 
 if [ "$ouinon" = "y" ] || [ "$ouinon" = "Y" ]
 	then
-		echo "Displaying ../gateway_id.txt with less command. Press key to start. Scroll with Space, Q to quit."
+		echo "Displaying /home/pi/lora_gateway/gateway_id.txt with less command. Press key to start. Scroll with Space, Q to quit."
 		read k
-		less ../gateway_id.txt
+		less /home/pi/lora_gateway/gateway_id.txt
 
-		echo "Displaying ../gateway_conf.json with less command. Press key to start. Scroll with Space, Q to quit."
+		echo "Displaying /home/pi/lora_gateway/gateway_conf.json with less command. Press key to start. Scroll with Space, Q to quit."
 		read k
-		less ../gateway_conf.json
+		less /home/pi/lora_gateway/gateway_conf.json
 
-		echo "Displaying ../clouds.json with less command. Press key to start. Scroll with Space, Q to quit."
+		echo "Displaying /home/pi/lora_gateway/clouds.json with less command. Press key to start. Scroll with Space, Q to quit."
 		read k
-		less ../clouds.json
+		less /home/pi/lora_gateway/clouds.json
 				
 		echo "Displaying /etc/hostapd/hostapd.conf with less command. Press key to start. Scroll with Space, Q to quit."
 		read k
