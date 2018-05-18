@@ -17,9 +17,8 @@
  *  along with the program.  If not, see <http://www.gnu.org/licenses/>.
  *
  ***************************************************************************** 
- * last update: Dec. 7th by C. Pham
  * 
- *  Version:                1.6
+ *  Version:                1.8
  *  Design:                 C. Pham
  *  Implementation:         C. Pham
  *
@@ -63,6 +62,11 @@
  *    - the S command sends a string of arbitrary size
  *      - /@S50# sends a 50B user payload packet filled with '#'. The real size is 55B with the Libelium header 
  *
+ *  if compiled with WITH_AES
+ *    - add LoRaWAN-like AES encyption, with MIC which provide reliable bad data rejection mechanisms
+ *      - /@AES# toggles AES ON and OFF
+ *      - /@LW# toggles pure LoRaWAN format, without underlying data header
+ *      
  *  if compiled with LORA_LAS
  *    - add LAS support
  *      - sending message will use LAS service
@@ -83,6 +87,16 @@
 */
 
 /*  Change logs
+ *  June, 29th, 2017. v1.8
+ *        Add CarrierSense selection method to perform tests
+ *          - CarrierSense0 does nothing -> pure ALOHA
+ *          - CarrierSense1 is the inital proposed carrier sense mechanism described in TOS LAS paper
+ *          - CarrierSense2 is an alternative carrier sense mechanism derived from 802.11
+ *          - CarrierSense3 is the proposed carrier sense mechanism 
+ *          - /@CS0#, /@CS1# or /@CS2# or /@CS3# can dynamically choose between those
+ *  May, 8th, 2017. v1.7 
+ *        Improve AES support
+ *        AppKey can now also be used with AES encryption, compile with WITH_APPKEY
  *  Dec, 7th, 2016. v1.6
  *        Improve CAD_TEST mode
  *          - will continously perform CAD, then will notify when channel activity has been detected.
@@ -210,8 +224,37 @@
 //
 // uncomment if your radio is an HopeRF RFM92W, HopeRF RFM95W, Modtronix inAir9B, NiceRF1276
 // or you known from the circuit diagram that output use the PABOOST line instead of the RFO line
-//#define PABOOST
+#define PABOOST
 /////////////////////////////////////////////////////////////////////////////////////////////////////////// 
+
+///////////////////////////////////////////////////////////////////
+// CHANGE HERE FOR VARIOUS BEHAVIORS
+/////////////////////////////////////////////////////////////////// 
+//#define SHOW_FREEMEMORY
+//#define CAD_TEST
+//#define PERIODIC_SENDER 15000
+//#define LORA_LAS
+//#define WITH_SEND_LED
+//#define WITH_AES
+//#define WITH_APPKEY
+///////////////////////////////////////////////////////////////////
+
+///////////////////////////////////////////////////////////////////
+// CHANGE HERE THE LORA MODE, NODE ADDRESS 
+#define LORAMODE  1
+#define LORA_ADDR 6
+// the special mode to test BW=125MHz, CR=4/5, SF=12
+// on the 868.1MHz channel
+//#define LORAMODE 11
+///////////////////////////////////////////////////////////////////
+
+#ifdef WITH_APPKEY
+///////////////////////////////////////////////////////////////////
+// CHANGE HERE THE APPKEY, BUT IF GW CHECKS FOR APPKEY, MUST BE
+// IN THE APPKEY LIST MAINTAINED BY GW.
+uint8_t my_appKey[4]={5, 6, 7, 8};
+///////////////////////////////////////////////////////////////////
+#endif
 
 // we wrapped Serial.println to support the Arduino Zero or M0
 #if defined __SAMD21G18A__ && not defined ARDUINO_SAMD_FEATHER_M0
@@ -241,17 +284,6 @@
   #define DEBUG_STR(fmt,param)    
   #define DEBUG_VALUE(fmt,param)  
 #endif
-
-///////////////////////////////////////////////////////////////////
-// CHANGE HERE FOR VARIOUS BEHAVIORS
-/////////////////////////////////////////////////////////////////// 
-//#define SHOW_FREEMEMORY
-//#define CAD_TEST
-//#define PERIODIC_SENDER 30000
-//#define LORA_LAS
-//#define WITH_SEND_LED
-//#define WITH_AES
-///////////////////////////////////////////////////////////////////
 
 #ifdef BAND868
 #define MAX_NB_CHANNEL 15
@@ -288,15 +320,6 @@ uint32_t loraChannelArray[MAX_NB_CHANNEL]={CH_00_433,CH_01_433,CH_02_433,CH_03_4
 #endif
 
 ///////////////////////////////////////////////////////////////////
-// CHANGE HERE THE LORA MODE, NODE ADDRESS 
-#define LORAMODE  1
-#define LORA_ADDR 6
-// the special mode to test BW=125MHz, CR=4/5, SF=12
-// on the 868.1MHz channel
-//#define LORAMODE 11
-///////////////////////////////////////////////////////////////////
-
-///////////////////////////////////////////////////////////////////
 // TO GATEWAY WHICH HAS ADDRESS 1
 #define DEFAULT_DEST_ADDR 1
 
@@ -326,21 +349,20 @@ boolean receivedFromLoRa=false;
 boolean withAck=false;
 
 bool radioON=false;
-bool RSSIonSend=true;
 
 uint8_t loraMode=LORAMODE;
-
 uint32_t loraChannel=loraChannelArray[loraChannelIndex];
-
 uint8_t loraAddr=LORA_ADDR;
 
 unsigned long startDoCad, endDoCad;
 bool extendedIFS=true;
 uint8_t SIFS_cad_number;
 // set to 0 to disable carrier sense based on CAD
-uint8_t send_cad_number=3;
+uint8_t send_cad_number=9;
 uint8_t SIFS_value[11]={0, 183, 94, 44, 47, 23, 24, 12, 12, 7, 4};
 uint8_t CAD_value[11]={0, 62, 31, 16, 16, 8, 9, 5, 3, 1, 1};
+uint8_t carrier_sense_method=2;
+bool RSSIonSend=false;
 
 unsigned int inter_pkt_time=0;
 unsigned int random_inter_pkt_time=0;
@@ -348,6 +370,7 @@ unsigned long next_periodic_sendtime=0L;
 
 // packet size for periodic sending
 uint8_t MSS=40;
+//uint8_t MSS=240;
 
 #ifdef WITH_AES
 #include "AES-128_V10.h"
@@ -373,11 +396,13 @@ uint16_t Frame_Counter_Up = 0x0000;
 unsigned char Direction = 0x00;
 
 boolean with_aes=false;
-boolean full_lorawan=false;
 #endif
+
+boolean full_lorawan=false;
+
 ///////////////////////////////////////////////////////////////////
 
-#if defined ARDUINO && defined SHOW_FREEMEMORY && not defined __MK20DX256__ && not defined __MKL26Z64__ && not defined  __SAMD21G18A__ && not defined _VARIANT_ARDUINO_DUE_X_
+#if defined ARDUINO && defined SHOW_FREEMEMORY && not defined __MK20DX256__ && not defined __MKL26Z64__ && not defined  __SAMD21G18A__ && not defined ARDUINO_SAM_DUE
 int freeMemory () {
   extern int __heap_start, *__brkval; 
   int v; 
@@ -508,6 +533,20 @@ void startConfig() {
   PRINT_CSTSTR("%s",": state ");
   PRINT_VALUE("%d", e);
   PRINTLN;
+
+  e=sx1272.getCRC();
+  PRINT_CSTSTR("%s","^$CRC ");
+  PRINT_VALUE("%d", sx1272._CRC);
+  PRINT_CSTSTR("%s",": state ");
+  PRINT_VALUE("%d", e);
+  PRINTLN;  
+
+  e=sx1272.setCRC_ON();
+  PRINT_CSTSTR("%s","^$CRC ");
+  PRINT_VALUE("%d", sx1272._CRC);
+  PRINT_CSTSTR("%s",": state ");
+  PRINT_VALUE("%d", e);
+  PRINTLN;  
   
   // Print a success message
   PRINT_CSTSTR("%s","^$SX1272/76 configured ");
@@ -526,32 +565,66 @@ void setup()
 #else
   Serial.begin(38400);  
 #endif  
-
+  // Print a start message
+  PRINT_CSTSTR("%s","LoRa interactive device\n");
+  
 #ifdef ARDUINO_AVR_PRO
-  PRINT_CSTSTR("%s","Arduino Pro Mini detected\n");
+  PRINT_CSTSTR("%s","Arduino Pro Mini detected\n");  
 #endif
-
 #ifdef ARDUINO_AVR_NANO
-  PRINT_CSTSTR("%s","Arduino Nano detected\n");
+  PRINT_CSTSTR("%s","Arduino Nano detected\n");   
 #endif
-
 #ifdef ARDUINO_AVR_MINI
-  PRINT_CSTSTR("%s","Arduino MINI/Nexus detected\n");
+  PRINT_CSTSTR("%s","Arduino Mini/Nexus detected\n");  
 #endif
-
+#ifdef ARDUINO_AVR_MEGA2560
+  PRINT_CSTSTR("%s","Arduino Mega2560 detected\n");  
+#endif
+#ifdef ARDUINO_SAM_DUE
+  PRINT_CSTSTR("%s","Arduino Due detected\n");  
+#endif
+#ifdef __MK66FX1M0__
+  PRINT_CSTSTR("%s","Teensy36 MK66FX1M0 detected\n");
+#endif
+#ifdef __MK64FX512__
+  PRINT_CSTSTR("%s","Teensy35 MK64FX512 detected\n");
+#endif
 #ifdef __MK20DX256__
-  PRINT_CSTSTR("%s","Teensy31/32 detected\n");
+  PRINT_CSTSTR("%s","Teensy31/32 MK20DX256 detected\n");
 #endif
-
 #ifdef __MKL26Z64__
-  PRINT_CSTSTR("%s","TeensyLC detected\n");
+  PRINT_CSTSTR("%s","TeensyLC MKL26Z64 detected\n");
 #endif
-
-#ifdef __SAMD21G18A__ 
+#ifdef ARDUINO_SAMD_ZERO 
   PRINT_CSTSTR("%s","Arduino M0/Zero detected\n");
 #endif
+#ifdef ARDUINO_AVR_FEATHER32U4 
+  PRINT_CSTSTR("%s","Adafruit Feather32U4 detected\n"); 
+#endif
+#ifdef  ARDUINO_SAMD_FEATHER_M0
+  PRINT_CSTSTR("%s","Adafruit FeatherM0 detected\n");
+#endif
 
-#if defined ARDUINO && defined SHOW_FREEMEMORY && not defined __MK20DX256__ && not defined __MKL26Z64__ && not defined  __SAMD21G18A__ && not defined _VARIANT_ARDUINO_DUE_X_
+// See http://www.nongnu.org/avr-libc/user-manual/using_tools.html
+// for the list of define from the AVR compiler
+
+#ifdef __AVR_ATmega328P__
+  PRINT_CSTSTR("%s","ATmega328P detected\n");
+#endif 
+#ifdef __AVR_ATmega32U4__
+  PRINT_CSTSTR("%s","ATmega32U4 detected\n");
+#endif 
+#ifdef __AVR_ATmega2560__
+  PRINT_CSTSTR("%s","ATmega2560 detected\n");
+#endif 
+#ifdef __SAMD21G18A__ 
+  PRINT_CSTSTR("%s","SAMD21G18A ARM Cortex-M0 detected\n");
+#endif
+#ifdef __SAM3X8E__ 
+  PRINT_CSTSTR("%s","SAM3X8E ARM Cortex-M3 detected\n");
+#endif
+
+#if defined ARDUINO && defined SHOW_FREEMEMORY && not defined __MK20DX256__ && not defined __MKL26Z64__ && not defined  __SAMD21G18A__ && not defined ARDUINO_SAM_DUE
     // Print a start message
   Serial.print(freeMemory());
   Serial.println(F(" bytes of free memory.")); 
@@ -598,12 +671,20 @@ void setup()
 #endif
 }
 
+void CarrierSense0() {
+  // this carrier sense perform nothing -> pure ALOHA
+}
+
 // we could use the CarrierSense function added in the SX1272 library, but it is more convenient to duplicate it here
 // so that we could easily modify it for testing
-void CarrierSense() {
+void CarrierSense1() {
   int e;
   bool carrierSenseRetry=false;
+  uint8_t n_collision=0;
   
+  PRINT_CSTSTR("%s","--> CarrierSense1: do CAD for DIFS=9CAD");
+  PRINTLN;  
+
   if (send_cad_number) {
     do { 
       do {
@@ -613,18 +694,20 @@ void CarrierSense() {
         e = sx1272.doCAD(send_cad_number);
         endDoCad=millis();
         
-        PRINT_CSTSTR("%s","--> CAD duration ");
+        PRINT_CSTSTR("%s","--> SIFS/DIFS duration ");
         PRINT_VALUE("%ld",endDoCad-startDoCad);
         PRINTLN;
         
         if (!e) {
           PRINT_CSTSTR("%s","OK1\n");
+
+          extendedIFS=true;
           
           if (extendedIFS)  {          
             // wait for random number of CAD         
             uint8_t w = random(1,8);
 
-            PRINT_CSTSTR("%s","--> waiting for ");
+            PRINT_CSTSTR("%s","--> extended wait for ");
             PRINT_VALUE("%d",w);
             PRINT_CSTSTR("%s"," CAD = ");
             PRINT_VALUE("%d",CAD_value[loraMode]*w);
@@ -637,7 +720,7 @@ void CarrierSense() {
             e = sx1272.doCAD(send_cad_number);
             endDoCad=millis();
  
-            PRINT_CSTSTR("%s","--> CAD duration ");
+            PRINT_CSTSTR("%s","--> SIFS/DIFS duration ");
             PRINT_VALUE("%ld",endDoCad-startDoCad);
             PRINTLN;
         
@@ -650,12 +733,15 @@ void CarrierSense() {
           }              
         }
         else {
-          PRINT_CSTSTR("%s","###1\n");  
+          n_collision++;
+          PRINT_CSTSTR("%s","###");  
+          PRINT_VALUE("%d",n_collision);
+          PRINTLN;
 
           // wait for random number of DIFS               
           uint8_t w = random(1,8);
        
-          PRINT_CSTSTR("%s","--> waiting for ");
+          PRINT_CSTSTR("%s","--> Channel busy. Wait for ");
           PRINT_VALUE("%d",w);
           PRINT_CSTSTR("%s"," DIFS (DIFS=3SIFS) = ");
           PRINT_VALUE("%d",SIFS_value[loraMode]*3*w);
@@ -663,6 +749,7 @@ void CarrierSense() {
           
           delay(SIFS_value[loraMode]*3*w);
           
+          // to perform a new DIFS          
           PRINT_CSTSTR("%s","--> retry\n");
         }
 
@@ -704,10 +791,274 @@ void CarrierSense() {
   }
 }
 
+void CarrierSense2() {
+  int e;
+  bool carrierSenseRetry=false;  
+  uint8_t foundBusyDuringDIFSafterBusyState=0;
+  uint8_t n_collision=0;
+  // upper bound of the random backoff timer
+  uint8_t W=2;  
+  
+  PRINT_CSTSTR("%s","--> CarrierSense2: do CAD for DIFS=9CAD");
+  PRINTLN;  
+  
+  if (send_cad_number) {
+    do { 
+        
+      do {
+        //D f W
+        //2 2 4
+        //3 3 8
+        //4 4 16
+        //5 5 16
+        //6 6 16
+        //...
+        
+        if (foundBusyDuringDIFSafterBusyState>1 && foundBusyDuringDIFSafterBusyState<5)
+          W=W*2;
+                
+        // check for free channel (SIFS/DIFS)        
+        startDoCad=millis();
+        e = sx1272.doCAD(send_cad_number);
+        endDoCad=millis();
+        
+        PRINT_CSTSTR("%s","--> DIFS duration ");
+        PRINT_VALUE("%ld",endDoCad-startDoCad);
+        PRINTLN;
+
+        // successull SIFS/DIFS
+        if (!e) {
+          
+          // previous collision detected
+          if (n_collision) {
+                
+              PRINT_CSTSTR("%s","--> counting for ");
+              // count for random number of CAD/SIFS/DIFS?   
+              // SIFS=3CAD
+              // DIFS=9CAD            
+              uint8_t w = random(0,W*send_cad_number);
+
+              PRINT_VALUE("%d", w);
+              PRINTLN;              
+
+              int busyCount=0;
+              bool nowBusy=false;
+              
+              do {
+
+                  if (nowBusy)
+                    e = sx1272.doCAD(send_cad_number);
+                  else
+                    e = sx1272.doCAD(1);
+
+                  if (nowBusy && e) {
+                    PRINT_CSTSTR("%s","#");
+                    busyCount++;                    
+                  }
+                  else
+                  if (nowBusy && !e) {
+                    PRINT_CSTSTR("%s","|");
+                    nowBusy=false;                    
+                  }                  
+                  else
+                  if (!e) {
+                    w--;
+                    PRINT_CSTSTR("%s","-");
+                  }  
+                  else {
+                    PRINT_CSTSTR("%s","*");
+                    nowBusy=true;
+                    busyCount++;  
+                  }
+                  
+              } while (w);      
+
+              // if w==0 then we exit and 
+              // the packet will be sent  
+              PRINTLN;
+              PRINT_CSTSTR("%s","--> found busy during ");
+              PRINT_VALUE("%d", busyCount);
+              PRINTLN; 
+          }
+          else {
+              PRINT_CSTSTR("%s","OK1\n");
+    
+              extendedIFS=false;
+              
+              if (extendedIFS)  {          
+                // wait for random number of CAD         
+                uint8_t w = random(1,8);
+    
+                PRINT_CSTSTR("%s","--> extended waiting for ");
+                PRINT_VALUE("%d",w);
+                PRINT_CSTSTR("%s"," CAD = ");
+                PRINT_VALUE("%d",CAD_value[loraMode]*w);
+                PRINTLN;
+                
+                delay(CAD_value[loraMode]*w);
+                
+                // check for free channel (SIFS/DIFS) once again
+                startDoCad=millis();
+                e = sx1272.doCAD(send_cad_number);
+                endDoCad=millis();
+     
+                PRINT_CSTSTR("%s","--> CAD duration ");
+                PRINT_VALUE("%ld",endDoCad-startDoCad);
+                PRINTLN;
+            
+                if (!e)
+                  PRINT_CSTSTR("%s","OK2");            
+                else
+                  PRINT_CSTSTR("%s","###2");
+                
+                PRINTLN;
+              }          
+          }    
+        }
+        else {
+          n_collision++;
+          foundBusyDuringDIFSafterBusyState++;          
+          PRINT_CSTSTR("%s","###");  
+          PRINT_VALUE("%d",n_collision);
+          PRINTLN;
+          
+          PRINT_CSTSTR("%s","--> Channel busy. Retry CAD until free channel\n");
+
+          int busyCount=0;
+              
+          startDoCad=millis();
+          do {
+            
+            e = sx1272.doCAD(1);
+
+            if (e) {
+                PRINT_CSTSTR("%s","R");
+                busyCount++;              
+            }
+                         
+          } while (e);
+
+          endDoCad=millis();
+
+          PRINTLN;
+
+          PRINT_CSTSTR("%s","--> found busy during ");
+          PRINT_VALUE("%d", busyCount);
+          PRINTLN;
+                        
+          PRINT_CSTSTR("%s","--> wait duration ");
+          PRINT_VALUE("%ld",endDoCad-startDoCad);
+          PRINTLN;
+
+          // to perform a new DIFS
+          PRINT_CSTSTR("%s","--> retry\n");
+          e=1;
+        }
+
+      } while (e);
+    
+      // CAD is OK, but need to check RSSI
+      if (RSSIonSend) {
+    
+          e=sx1272.getRSSI();
+          
+          uint8_t rssi_retry_count=10;
+          
+          if (!e) {
+          
+            PRINT_CSTSTR("%s","--> RSSI ");
+            PRINT_VALUE("%d", sx1272._RSSI);
+            PRINTLN;
+            
+            while (sx1272._RSSI > -90 && rssi_retry_count) {
+              
+              delay(1);
+              sx1272.getRSSI();
+              PRINT_CSTSTR("%s","--> RSSI ");
+              PRINT_VALUE("%d",  sx1272._RSSI);       
+              PRINTLN; 
+              rssi_retry_count--;
+            }
+          }
+          else
+            PRINT_CSTSTR("%s","--> RSSI error\n"); 
+        
+          if (!rssi_retry_count)
+            carrierSenseRetry=true;  
+          else
+      carrierSenseRetry=false;            
+      }
+      
+    } while (carrierSenseRetry);  
+  }
+}
+
+void CarrierSense3() {
+  int e;
+  bool carrierSenseRetry=false;
+  uint8_t n_collision=0;
+  uint8_t n_cad=9;
+  
+  uint32_t max_toa = sx1272.getToA(255);
+
+  //unsigned long end_carrier_sense=0;
+  
+  if (send_cad_number) {
+    do { 
+
+      PRINT_CSTSTR("%s","--> CarrierSense3: do CAD for MaxToa=");
+      PRINT_VALUE("%ld", max_toa);
+      PRINTLN;  
+        
+      //end_carrier_sense=millis()+(max_toa/n_cad)*(n_cad-1);
+      
+      for (int i=0; i<n_cad; i++) {      
+        startDoCad=millis();
+        e = sx1272.doCAD(1);
+        endDoCad=millis();
+
+        if (!e) {
+          PRINT_VALUE("%ld", endDoCad);
+          PRINT_CSTSTR("%s"," 0 ");
+          PRINT_VALUE("%d", sx1272._RSSI);
+          PRINT_CSTSTR("%s"," ");
+          PRINT_VALUE("%ld", endDoCad-startDoCad);
+          PRINTLN;
+        }
+        else
+          continue;
+          
+        // wait in order to have n_cad CAD operations during max_toa
+        delay(max_toa/(n_cad-1)-(millis()-startDoCad));
+      }
+
+      if (e) {
+        n_collision++;
+        PRINT_CSTSTR("%s","###");  
+        PRINT_VALUE("%d",n_collision);
+        PRINTLN;
+                  
+        PRINT_CSTSTR("%s","Channel busy. Wait for MaxToA=");
+        PRINT_VALUE("%ld", max_toa);
+        PRINTLN;        
+        delay(max_toa);
+        // to perform a new max_toa waiting
+        PRINT_CSTSTR("%s","--> retry\n");        
+        carrierSenseRetry=true;
+      }
+      else
+        carrierSenseRetry=false;
+      
+    } while (carrierSenseRetry);  
+  }
+}
+
 void loop(void)
 { 
   int i=0, e;
   int cmdValue;
+  uint8_t app_key_offset=0;
+    
 /////////////////////////////////////////////////////////////////// 
 // ONLY FOR TESTING CAD
 #ifdef CAD_TEST
@@ -718,17 +1069,10 @@ void loop(void)
   while (1) {
   
       startDoCad=millis();
-      e = sx1272.doCAD(6);
+      // for energy testing, use 100
+      //e = sx1272.doCAD(100);      
+      e = sx1272.doCAD(1);
       endDoCad=millis();
-      
-      //PRINT_CSTSTR("%s","--> SIFS duration ");
-      //PRINT_VALUE("%ld", endDoCad-startDoCad);
-      //PRINTLN;
-    
-      //if (!e) 
-      //  PRINT_CSTSTR("%s","OK");
-      //else
-      //  PRINT_CSTSTR("%s","###");
 
       if (e && !CadDetected) {
         PRINT_CSTSTR("%s","#########\n");
@@ -752,29 +1096,18 @@ void loop(void)
         
       if (e) {
         PRINT_VALUE("%ld", endDoCad);
-        PRINT_CSTSTR("%s"," ## ");
+        PRINT_CSTSTR("%s"," 1 ");
         PRINT_VALUE("%d", sx1272._RSSI);
+        PRINT_CSTSTR("%s"," ");
+        PRINT_VALUE("%ld", endDoCad-startDoCad);
         PRINTLN;
       }
-      
-      //delay(200);
-      
-      //startDoCad=millis();
-      //e = sx1272.doCAD(SIFS_cad_number*3);
-      //endDoCad=millis();
-      
-      //PRINT_CSTSTR("%s","--> DIFS duration ");
-      //PRINT_VALUE("%ld", endDoCad-startDoCad);
-      //PRINTLN;
-    
-      //if (!e) 
-      //  PRINT_CSTSTR("%s","OK");
-      //else
-      //  PRINT_CSTSTR("%s","###");
-      
-      //PRINTLN;
-        
-      delay(200);
+
+      // for energy testing, use 12000
+      //delay(12000);
+      // you can also use 100ms to test CAD frequency impact
+      //delay(100);      
+      delay(1000);      
   }
 #endif
 // ONLY FOR TESTING CAD
@@ -812,7 +1145,7 @@ void loop(void)
   }
 
 /////////////////////////////////////////////////////////////////// 
-// THE MAIN LOOP FOR AN INETRACTIVE END-DEVICE
+// THE MAIN LOOP FOR AN INTERACTIVE END-DEVICE
 //
   if (radioON && !receivedFromSerial) {
  
@@ -834,13 +1167,32 @@ void loop(void)
           PRINT_CSTSTR("%s","Sending : ");
           PRINT_STR("%s",cmd);  
           PRINTLN;
-          
-          CarrierSense();
+
+          if (carrier_sense_method==0)
+              CarrierSense0();
+                        
+          if (carrier_sense_method==1)
+              CarrierSense1();
+    
+          if (carrier_sense_method==2)
+              CarrierSense2();
+
+          if (carrier_sense_method==3)
+              CarrierSense3();              
           
           PRINT_CSTSTR("%s","Packet number ");
           PRINT_VALUE("%d",sx1272._packetNumber);
           PRINTLN;
+
+          PRINT_CSTSTR("%s","Payload size is ");  
+          PRINT_VALUE("%d",strlen(cmd));
+          PRINTLN;
           
+          uint32_t toa = sx1272.getToA(strlen(cmd)+(full_lorawan?0:OFFSET_PAYLOADLENGTH));      
+          PRINT_CSTSTR("%s","ToA is w/4B header ");
+          PRINT_VALUE("%d",toa);
+          PRINTLN;     
+                    
           long startSend=millis();
           
 #ifdef WITH_SEND_LED
@@ -857,6 +1209,7 @@ void loop(void)
           PRINT_CSTSTR("%s","Packet sent, state ");
           PRINT_VALUE("%d",e);
           PRINTLN;
+            
           //Serial.flush();
           
           if (random_inter_pkt_time) {                
@@ -976,13 +1329,13 @@ void loop(void)
     boolean sendCmd=false;
     boolean withTmpAck=false;
     int forTmpDestAddr=-1;
-    
+
     i=0;
     
     if (cmd[i]=='/' && cmd[i+1]=='@') {
 
       PRINT_CSTSTR("%s","^$Parsing command\n");      
-      i=2;
+      i=i+2;
       
       PRINT_CSTSTR("%s","^$");
       PRINT_STR("%s",cmd);
@@ -1006,11 +1359,7 @@ void loop(void)
                       PRINT_VALUE("%d",cmdValue);  
                       PRINTLN;                    
                       // Set power dBm
-#if defined RADIO_RFM92_95 || defined RADIO_INAIR9B || defined RADIO_20DBM                      
-                      e = sx1272.setPowerDBM((uint8_t)cmdValue, 1);
-#else
                       e = sx1272.setPowerDBM((uint8_t)cmdValue);
-#endif
                       PRINT_CSTSTR("%s","^$set power dBm: state ");
                       PRINT_VALUE("%d",e);  
                       PRINTLN;   
@@ -1283,6 +1632,21 @@ void loop(void)
                     
                   PRINTLN;
               }
+              else if (cmd[i+1]=='S') {
+                  i=i+2;
+                  cmdValue=getCmdValue(i);
+
+                  if (cmdValue > 3) {
+                    PRINT_CSTSTR("%s","^$Carrier Sense method must be 0, 1, 2 or 3.\n");
+                    cmdValue=2;    
+                  }
+
+                  carrier_sense_method=cmdValue;
+
+                  PRINT_CSTSTR("%s","^$Selected carrier Sense method is ");  
+                  PRINT_VALUE("%d",carrier_sense_method);
+                  PRINTLN;
+              }
               else {      
                   i++;
                   cmdValue=getCmdValue(i);
@@ -1334,7 +1698,7 @@ void loop(void)
 
                 if (cmd[i+3]=='#') {
                   // point to the start of the message, skip /@ACK#
-                  i=6;
+                  i=i+4;
                   withTmpAck=true;
                   sendCmd=true;         
                 }
@@ -1505,24 +1869,6 @@ void loop(void)
           PRINT_CSTSTR("%s","Send error\n");  
       }      
 #else  
-      // only the DIFS/SIFS mechanism
-      // we chose to have a complete control code insytead of using the implementation of the LAS class
-      // for better debugging and tests features if needed.    
-      PRINT_CSTSTR("%s","Payload size is ");  
-      PRINT_VALUE("%d",pl);
-      PRINTLN;
-      
-      uint32_t toa = sx1272.getToA(pl+OFFSET_PAYLOADLENGTH);      
-      PRINT_CSTSTR("%s","ToA is w/4B header ");
-      PRINT_VALUE("%d",toa);
-      PRINTLN;
-      
-      long startSend, endSend;
-      long startSendCad;
-      
-      startSendCad=millis();
-      CarrierSense();
-      startSend=millis();
 
 #ifdef WITH_SEND_LED
       digitalWrite(SEND_LED, HIGH);
@@ -1532,34 +1878,60 @@ void loop(void)
       PRINT_VALUE("%d",sx1272._packetNumber);
       PRINTLN;
 
+      // buffer to store the message to be transmitted
+      unsigned char LORAWAN_Data[256];
+      unsigned char LORAWAN_Package_Length=9;
+           
+      uint8_t p_type=PKT_TYPE_DATA;
+
+#ifdef WITH_APPKEY
+      app_key_offset = (full_lorawan?0:sizeof(my_appKey));
+
+      if (app_key_offset) {
+        p_type = p_type | PKT_FLAG_DATA_WAPPKEY;
+      }
+#endif      
+          
 #ifdef WITH_AES
       if (with_aes) {
 
+          p_type = p_type | PKT_FLAG_DATA_ENCRYPTED;
+
+          //we use LORAWAN_Data buffer to store the intermediate message
+#ifdef WITH_APPKEY
+          //copy the appkey after the LoRaWAN packet header
+          memcpy(LORAWAN_Data+LORAWAN_Package_Length,my_appKey,app_key_offset);
+
+          pl+=app_key_offset;
+#endif
+          //copy the payload
+          memcpy(LORAWAN_Data+LORAWAN_Package_Length+app_key_offset,(uint8_t *)(&cmd[i]),pl);
+                    
           PRINT_CSTSTR("%s","plain payload hex\n");
           for (int j=i; j<i+pl;j++) {
-            if (cmd[j]<16)
+            if (LORAWAN_Data[LORAWAN_Package_Length+j]<16)
               PRINT_CSTSTR("%s","0");
-            PRINT_HEX("%X", cmd[j]);
+            PRINT_HEX("%X", LORAWAN_Data[LORAWAN_Package_Length+j]);
             PRINT_CSTSTR("%s"," ");
           }
           PRINTLN; 
     
           PRINT_CSTSTR("%s","Encrypting\n");     
           PRINT_CSTSTR("%s","encrypted payload\n");
-          Encrypt_Payload((unsigned char*)(&cmd[i]), pl, Frame_Counter_Up, Direction);
+
+          Encrypt_Payload(LORAWAN_Data+LORAWAN_Package_Length, pl, Frame_Counter_Up, Direction);
+          
           //Print encrypted message
           for (int j=i; j<i+pl;j++) {
-            if (cmd[j]<16)
+            if (LORAWAN_Data[LORAWAN_Package_Length+j]<16)
               PRINT_CSTSTR("%s","0");
-            PRINT_HEX("%X", cmd[j]);
+            PRINT_HEX("%X", LORAWAN_Data[LORAWAN_Package_Length+j]);
             PRINT_CSTSTR("%s"," ");
           }
           PRINTLN;   
     
           // with encryption, we use for the payload a LoRaWAN packet format to reuse available LoRaWAN encryption libraries
           //
-          unsigned char LORAWAN_Data[256];
-          unsigned char LORAWAN_Package_Length;
           unsigned char MIC[4];
           //Unconfirmed data up
           unsigned char Mac_Header = 0x40;
@@ -1584,17 +1956,7 @@ void loop(void)
         
           LORAWAN_Data[8] = Frame_Port;
         
-          //Set Current package length
-          LORAWAN_Package_Length = 9;
-          
-          //Load Data
-          for(int j = i; j < i+pl; j++)
-          {
-            // see that we don't take the appkey, just the encrypted data that starts that message[app_key_offset]
-            LORAWAN_Data[LORAWAN_Package_Length + j] = cmd[i+j];
-          }
-        
-          //Add data Lenth to package length
+          //Add data Length to package length
           LORAWAN_Package_Length = LORAWAN_Package_Length + pl;
         
           PRINT_CSTSTR("%s","calculate MIC with NwkSKey\n");
@@ -1609,6 +1971,9 @@ void loop(void)
         
           //Add MIC length to package length
           LORAWAN_Package_Length = LORAWAN_Package_Length + 4;
+
+          //introduce here an error for testing
+          //LORAWAN_Data[10]=0;
         
           PRINT_CSTSTR("%s","transmitted LoRaWAN-like packet:\n");
           PRINT_CSTSTR("%s","MHDR[1] | DevAddr[4] | FCtrl[1] | FCnt[2] | FPort[1] | EncryptedPayload | MIC[4]\n");
@@ -1622,8 +1987,6 @@ void loop(void)
           }
           PRINTLN;      
     
-          // copy back to cmd
-          memcpy((unsigned char *)(&cmd[i]),LORAWAN_Data,LORAWAN_Package_Length);
           pl = LORAWAN_Package_Length;     
 
           if (full_lorawan) {
@@ -1635,28 +1998,72 @@ void loop(void)
           
           // we increment Frame_Counter_Up
           // even if the transmission will not succeed
-          Frame_Counter_Up++;
-
-          // encrypted data
-          sx1272.setPacketType(PKT_TYPE_DATA | PKT_FLAG_DATA_ENCRYPTED);   
+          Frame_Counter_Up++;   
       }
-      else
-        sx1272.setPacketType(PKT_TYPE_DATA);
-#else     
-      sx1272.setPacketType(PKT_TYPE_DATA); 
+      else {
+#ifdef WITH_APPKEY
+          memcpy(LORAWAN_Data,my_appKey,app_key_offset);
+#endif          
+          memcpy(LORAWAN_Data+app_key_offset,(uint8_t *)(&cmd[i]),pl);
+
+          pl+=app_key_offset;
+      }
+#else
+      
+#ifdef WITH_APPKEY
+      memcpy(LORAWAN_Data,my_appKey,app_key_offset));
+#endif      
+
+      memcpy(LORAWAN_Data+app_key_offset,(uint8_t *)(&cmd[i]),pl);
+
+      pl+=app_key_offset;
 #endif
-        
+
+      sx1272.setPacketType(p_type);
+
+      PRINT_CSTSTR("%s","Payload size is ");  
+      PRINT_VALUE("%d",pl);
+      PRINTLN;
+      
+      uint32_t toa = sx1272.getToA(pl+(full_lorawan?0:OFFSET_PAYLOADLENGTH));      
+      PRINT_CSTSTR("%s","ToA is w/4B header ");
+      PRINT_VALUE("%d",toa);
+      PRINTLN;      
+
+      // only the DIFS/SIFS mechanism
+      // we chose to have a complete control code instead of using the implementation of the LAS class
+      // for better debugging and tests features if needed.    
+      
+      long startSend, endSend;
+      long startSendCad;
+      
+      startSendCad=millis();
+      
+      if (carrier_sense_method==0)
+          CarrierSense0();
+              
+      if (carrier_sense_method==1)
+          CarrierSense1();
+
+      if (carrier_sense_method==2)
+          CarrierSense2();
+
+      if (carrier_sense_method==3)
+          CarrierSense3();            
+                    
+      startSend=millis();
+                        
       if (forTmpDestAddr>=0) {
         if (withAck)
-          e = sx1272.sendPacketTimeoutACK(forTmpDestAddr, (uint8_t*)(&cmd[i]), pl, 10000);  
+          e = sx1272.sendPacketTimeoutACK(forTmpDestAddr, LORAWAN_Data, pl, 10000);  
         else    
-          e = sx1272.sendPacketTimeout(forTmpDestAddr, (uint8_t*)(&cmd[i]), pl, 10000);
+          e = sx1272.sendPacketTimeout(forTmpDestAddr, LORAWAN_Data, pl, 10000);
       }
       else {
         if (withAck || withTmpAck)   
-          e = sx1272.sendPacketTimeoutACK(dest_addr, (uint8_t*)(&cmd[i]), pl, 10000);    
+          e = sx1272.sendPacketTimeoutACK(dest_addr, LORAWAN_Data, pl, 10000);    
          else 
-          e = sx1272.sendPacketTimeout(dest_addr, (uint8_t*)(&cmd[i]), pl, 10000);
+          e = sx1272.sendPacketTimeout(dest_addr, LORAWAN_Data, pl, 10000);
       }
 
 #ifdef WITH_SEND_LED

@@ -17,7 +17,7 @@
  *  along with the program.  If not, see <http://www.gnu.org/licenses/>.
  *
  *****************************************************************************
- * last update: Nov. 16th by C. Pham
+ * last update: Jan. 19th, 2018 by C. Pham
  */
 #include <SPI.h>  
 // Include the SX1272
@@ -37,7 +37,7 @@
 //
 // uncomment if your radio is an HopeRF RFM92W, HopeRF RFM95W, Modtronix inAir9B, NiceRF1276
 // or you known from the circuit diagram that output use the PABOOST line instead of the RFO line
-//#define PABOOST
+#define PABOOST
 /////////////////////////////////////////////////////////////////////////////////////////////////////////// 
 
 // IMPORTANT
@@ -110,23 +110,59 @@ void setup()
   PRINT_CSTSTR("%s","Simple LoRa ping-pong with the gateway\n");  
 
 #ifdef ARDUINO_AVR_PRO
-  PRINT_CSTSTR("%s","Arduino Pro Mini detected\n");
+  PRINT_CSTSTR("%s","Arduino Pro Mini detected\n");  
 #endif
-
 #ifdef ARDUINO_AVR_NANO
-  PRINT_CSTSTR("%s","Arduino Nano detected\n");
+  PRINT_CSTSTR("%s","Arduino Nano detected\n");   
 #endif
-
 #ifdef ARDUINO_AVR_MINI
-  PRINT_CSTSTR("%s","Arduino MINI/Nexus detected\n");
+  PRINT_CSTSTR("%s","Arduino MINI/Nexus detected\n");  
 #endif
-
+#ifdef ARDUINO_AVR_MEGA2560
+  PRINT_CSTSTR("%s","Arduino Mega2560 detected\n");  
+#endif
+#ifdef ARDUINO_SAM_DUE
+  PRINT_CSTSTR("%s","Arduino Due detected\n");  
+#endif
+#ifdef __MK66FX1M0__
+  PRINT_CSTSTR("%s","Teensy36 MK66FX1M0 detected\n");
+#endif
+#ifdef __MK64FX512__
+  PRINT_CSTSTR("%s","Teensy35 MK64FX512 detected\n");
+#endif
 #ifdef __MK20DX256__
-  PRINT_CSTSTR("%s","Teensy31/32 detected\n");
+  PRINT_CSTSTR("%s","Teensy31/32 MK20DX256 detected\n");
+#endif
+#ifdef __MKL26Z64__
+  PRINT_CSTSTR("%s","TeensyLC MKL26Z64 detected\n");
+#endif
+#if defined ARDUINO_SAMD_ZERO && not defined ARDUINO_SAMD_FEATHER_M0
+  PRINT_CSTSTR("%s","Arduino M0/Zero detected\n");
+#endif
+#ifdef ARDUINO_AVR_FEATHER32U4 
+  PRINT_CSTSTR("%s","Adafruit Feather32U4 detected\n"); 
+#endif
+#ifdef  ARDUINO_SAMD_FEATHER_M0
+  PRINT_CSTSTR("%s","Adafruit FeatherM0 detected\n");
 #endif
 
+// See http://www.nongnu.org/avr-libc/user-manual/using_tools.html
+// for the list of define from the AVR compiler
+
+#ifdef __AVR_ATmega328P__
+  PRINT_CSTSTR("%s","ATmega328P detected\n");
+#endif 
+#ifdef __AVR_ATmega32U4__
+  PRINT_CSTSTR("%s","ATmega32U4 detected\n");
+#endif 
+#ifdef __AVR_ATmega2560__
+  PRINT_CSTSTR("%s","ATmega2560 detected\n");
+#endif 
 #ifdef __SAMD21G18A__ 
-  PRINT_CSTSTR("%s","Arduino M0/Zero detected\n");
+  PRINT_CSTSTR("%s","SAMD21G18A ARM Cortex-M0+ detected\n");
+#endif
+#ifdef __SAM3X8E__ 
+  PRINT_CSTSTR("%s","SAM3X8E ARM Cortex-M3 detected\n");
 #endif
 
   // Power ON the module
@@ -204,10 +240,15 @@ void loop(void)
       PRINTLN;
       
       if (e==3)
-          PRINT_CSTSTR("%s","No Pong!");
+          PRINT_CSTSTR("%s","No Pong from gw!");
         
-      if (e==0)
-          PRINT_CSTSTR("%s","Pong received from gateway!");      
+      if (e==0) {
+          char message[20];
+          sprintf(message,"SNR at gw=%d   ", sx1272._rcv_snr_in_ack);
+          PRINT_CSTSTR("%s","Pong received from gateway!");
+          PRINTLN;
+          PRINT_STR("%s", message);      
+      }      
 
       PRINTLN;
       

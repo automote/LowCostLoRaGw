@@ -30,6 +30,31 @@
 #include <SPI.h>
 
 /*  CHANGE LOGS by C. Pham
+ *  March 28th, 2018
+ *		- check at packet reception that the packet type is correct, otherwise discard the packet and returned error code is 5
+ *      - add max number of retries for CarrierSense
+ *  Feb 28th, 2018
+ *		- there is no longer is_binary flag, replaced by is_downlink flag
+ *		- the flags are then from left to right: ack_requested|encrypted|with_appkey|is_downlink
+ *  Feb 25th, 2018
+ *      - use shared payload buffer for packet_sent and packet_received
+ *      - use dedicated smaller buffer for ACK
+ *  Feb 13th, 2018
+ *      - fix bug in availableData() to set back the LoRa module into standby mode. This affected only some radio modules
+ *	Jan 19th, 2018
+ *		- add a setCSPin(uint8_t cs) function to set the Chip Select (CS) pin
+ *		- call sx1272.setCSPin(18) for instance before calling sx1272.ON()
+ *		- by default, the CS pin will be set to SX1272_SS defined in SX1272.h
+ *  November 10th, 2017
+ *		- change the way packet's RSSI is computed
+ *  November 7th, 2017
+ *      - bug fix in how the CRC is checked at receiver in getPacket() function
+ *  November 3rd, 2017
+ *      - IMPORTANT: the CS pin is now always pin number 10 on Arduino boards
+ *      - if you use the Libelium Multiprotocol shield to connect a Libelium LoRa then change the CS pin to pin 2 in SX1272.h
+ *      - CRC (RxPayloadCrcOn) is now ON by default for transmitter side (end-device)
+ *  June, 22th, 2017
+ *      - setPowerDBM(uint8_t dbm) calls setPower('X') when dbm is set to 20
  *  Apr, 21th, 2017
  *      - change the way timeout are detected: exitTime=millis()+(unsigned long)wait; then millis() < exitTime;
  *  Mar, 26th, 2017
@@ -106,6 +131,9 @@ uint8_t sx1272_CAD_value[11]={0, 62, 31, 16, 16, 8, 9, 5, 3, 1, 1};
 
 SX1272::SX1272()
 {
+	//set the Chip Select pin
+	_SX1272_SS=SX1272_SS;
+	
     // Initialize class variables
     _bandwidth = BW_125;
     _codingRate = CR_5;
@@ -121,7 +149,7 @@ SX1272::SX1272()
     // added by C. Pham
     _defaultSyncWord=0x12;
     _rawFormat=false;
-    _extendedIFS=true;
+    _extendedIFS=false;
     _RSSIonSend=true;
     // disabled by default
     _enableCarrierSense=false;
@@ -143,8 +171,14 @@ SX1272::SX1272()
     _my_netkey[0] = net_key_0;
     _my_netkey[1] = net_key_1;
 #endif
+    // we use the same memory area to reduce memory footprint
+    packet_sent.data=packet_data;
+    packet_received.data=packet_data;
+    // ACK packet has a very small separate memory area
+    ACK.data=ack_data;
     // end
-    _maxRetries = 3;
+    // modified by C. Pham
+    _maxRetries = 0;
     packet_sent.retry = _retries;
 };
 
@@ -196,8 +230,8 @@ uint8_t SX1272::ON()
 #endif
 
     // Powering the module
-    pinMode(SX1272_SS,OUTPUT);
-    digitalWrite(SX1272_SS,HIGH);
+    pinMode(_SX1272_SS,OUTPUT);
+    digitalWrite(_SX1272_SS,HIGH);
     delay(100);
 
     //#define USE_SPI_SETTINGS
@@ -264,6 +298,10 @@ uint8_t SX1272::ON()
 
     // set LoRa mode
     state = setLORA();
+
+    // Added by C. Pham     
+    // set CRC ON
+    setCRC_ON();
 
     // Added by C. Pham for ToA computation
     getPreambleLength();
@@ -418,6 +456,9 @@ uint8_t SX1272::ON()
 #endif
     //end
 
+    //init random generator
+    randomSeed(millis());
+
     return state;
 }
 
@@ -434,8 +475,8 @@ void SX1272::OFF()
 
     SPI.end();
     // Powering the module
-    pinMode(SX1272_SS,OUTPUT);
-    digitalWrite(SX1272_SS,LOW);
+    pinMode(_SX1272_SS,OUTPUT);
+    digitalWrite(_SX1272_SS,LOW);
 #if (SX1272_debug_mode > 1)
     Serial.println(F("## Setting OFF ##"));
     Serial.println();
@@ -452,11 +493,11 @@ byte SX1272::readRegister(byte address)
 {
     byte value = 0x00;
 
-    digitalWrite(SX1272_SS,LOW);
+    digitalWrite(_SX1272_SS,LOW);
     bitClear(address, 7);		// Bit 7 cleared to write in registers
     SPI.transfer(address);
     value = SPI.transfer(0x00);
-    digitalWrite(SX1272_SS,HIGH);
+    digitalWrite(_SX1272_SS,HIGH);
 
 #if (SX1272_debug_mode > 1)
     Serial.print(F("## Reading:  ##\t"));
@@ -479,11 +520,11 @@ byte SX1272::readRegister(byte address)
 */
 void SX1272::writeRegister(byte address, byte data)
 {
-    digitalWrite(SX1272_SS,LOW);
+    digitalWrite(_SX1272_SS,LOW);
     bitSet(address, 7);			// Bit 7 set to read from registers
     SPI.transfer(address);
     SPI.transfer(data);
-    digitalWrite(SX1272_SS,HIGH);
+    digitalWrite(_SX1272_SS,HIGH);
 
 #if (SX1272_debug_mode > 1)
     Serial.print(F("## Writing:  ##\t"));
@@ -557,11 +598,12 @@ uint8_t SX1272::setLORA()
         st0 = readRegister(REG_OP_MODE);
         Serial.println(F("..."));
 
-        if ((retry % 2)==0)
+        if ((retry % 2)==0) {
             if (retry==20)
                 retry=0;
             else
                 retry++;
+        }       
         /*
         if (st0!=LORA_STANDBY_MODE) {
             pinMode(SX1272_RST,OUTPUT);
@@ -1305,8 +1347,8 @@ int8_t	SX1272::setHeaderON()
                 state = 1;
             }
         }
-        return state;
     }
+	return state;
 }
 
 /*
@@ -1730,8 +1772,8 @@ uint8_t	SX1272::setSF(uint8_t spr)
 {
     byte st0;
     int8_t state = 2;
-    byte config1;
-    byte config2;
+    byte config1=0;
+    byte config2=0;
 
 #if (SX1272_debug_mode > 1)
     Serial.println();
@@ -2742,7 +2784,8 @@ uint8_t SX1272::getPower()
     // get only the OutputPower
     _power = value & B00001111;
 
-    if( (value > -1) & (value < 16) )
+    //if( (value > -1) & (value < 16) )
+    if( _power < 16 )
     {
         state = 0;
 #if (SX1272_debug_mode > 1)
@@ -2923,7 +2966,7 @@ int8_t SX1272::setPowerNum(uint8_t pow)
         writeRegister(REG_OP_MODE, FSK_STANDBY_MODE);
     }
 
-    if ( (pow >= 0) & (pow < 15) )
+    if ( (pow >= 0) && (pow < 15) )
     {
         _power = pow;
     }
@@ -3468,14 +3511,15 @@ int16_t SX1272::getRSSIpacket()
                 // added by C. Pham, using Semtech SX1272 rev3 March 2015
                 // for SX1272 we use -139, for SX1276, we use -157
                 // then for SX1276 when using low-frequency (i.e. 433MHz) then we use -164
-                _RSSIpacket = -(OFFSET_RSSI+(_board==SX1276Chip?18:0)+(_channel<CH_04_868?7:0)) + (double)_RSSIpacket + (double)_rawSNR*0.25;
+                //_RSSIpacket = -(OFFSET_RSSI+(_board==SX1276Chip?18:0)+(_channel<CH_04_868?7:0)) + (double)_RSSIpacket + (double)_rawSNR*0.25;
+                _RSSIpacket = -(OFFSET_RSSI+(_board==SX1276Chip?18:0)+(_channel<CH_04_868?7:0)) + (double)_RSSIpacket + (double)_SNR*0.25;
                 state = 0;
             }
             else
             {
                 // commented by C. Pham
                 //_RSSIpacket = readRegister(REG_PKT_RSSI_VALUE);
-                _RSSIpacket = -(OFFSET_RSSI+(_board==SX1276Chip?18:0)+(_channel<CH_04_868?7:0)) + (double)_RSSIpacket;
+                _RSSIpacket = -(OFFSET_RSSI+(_board==SX1276Chip?18:0)+(_channel<CH_04_868?7:0)) + (double)_RSSIpacket*16.0/15.0;
                 //end
                 state = 0;
             }
@@ -3917,6 +3961,7 @@ uint8_t SX1272::receive()
 
     // Initializing packet_received struct
     memset( &packet_received, 0x00, sizeof(packet_received) );
+    packet_received.data=packet_data;
 
     // Setting Testmode
     // commented by C. Pham
@@ -3997,6 +4042,9 @@ uint8_t SX1272::receivePacketTimeout()
 /*
  Function: Configures the module to receive information.
  Returns: Integer that determines if there has been any error
+   state = 5  --> The packet header (packet type) has not been recognized
+   state = 4  --> The packet has been incorrectly received (CRC for instance)
+   state = 3  --> No packet has been received during the receive windows 
    state = 2  --> The command has not been executed
    state = 1  --> There has been an error while executing the command
    state = 0  --> The command has been executed with no errors
@@ -4011,7 +4059,6 @@ uint8_t SX1272::receivePacketTimeout(uint16_t wait)
 {
     uint8_t state = 2;
     uint8_t state_f = 2;
-
 
 #if (SX1272_debug_mode > 1)
     Serial.println();
@@ -4043,7 +4090,11 @@ uint8_t SX1272::receivePacketTimeout(uint16_t wait)
         {
             state_f = 4;  // The packet has been incorrectly received
         }
-        else
+        else if ( _reception == INCORRECT_PACKET_TYPE )
+        {
+            state_f = 5;  // The packet type has not been recognized
+        }
+        else        
         {
             state_f = 0;  // The packet has been correctly received
             // added by C. Pham
@@ -4224,6 +4275,7 @@ uint8_t SX1272::receivePacketTimeoutACK(uint16_t wait)
     }
     return state_f;
     */
+    return 0;
 }
 
 /*
@@ -4452,19 +4504,21 @@ boolean	SX1272::availableData(uint16_t wait)
             Serial.println(F("## Packet received is not for me ##"));
             Serial.println();
 #endif
-            if( _modem == LORA )	// STANDBY PARA MINIMIZAR EL CONSUMO
-            { // LoRa mode
-                //writeRegister(REG_OP_MODE, LORA_STANDBY_MODE);	// Setting standby LoRa mode
-            }
-            else
-            { //  FSK mode
-                writeRegister(REG_OP_MODE, FSK_STANDBY_MODE);	// Setting standby FSK mode
-            }
         }
     }
-    //----else
-    //	{
-    //	}
+
+    // added by C. Pham
+    if (_hreceived==false || forme==false) {
+        if( _modem == LORA )	// STANDBY PARA MINIMIZAR EL CONSUMO
+        { // LoRa mode
+            writeRegister(REG_OP_MODE, LORA_STANDBY_MODE);	// Setting standby LoRa mode
+        }
+        else
+        { //  FSK mode
+            writeRegister(REG_OP_MODE, FSK_STANDBY_MODE);	// Setting standby FSK mode
+        }
+    }
+
     return forme;
 }
 
@@ -4535,27 +4589,41 @@ int8_t SX1272::getPacket(uint16_t wait)
             //}
         } // end while (millis)
 
-        if( (bitRead(value, 6) == 1) && (bitRead(value, 5) == 0) )
-        { // packet received & CRC correct
-            p_received = true;	// packet correctly received
-            _reception = CORRECT_PACKET;
+        // modified by C. Pham
+        // RxDone
+        if ((bitRead(value, 6) == 1)) {
 #if (SX1272_debug_mode > 0)
-            Serial.println(F("## Packet correctly received in LoRa mode ##"));
+            Serial.println(F("## Packet received in LoRa mode ##"));
 #endif
-        }
-        else
-        {
-            if( bitRead(value, 5) != 0 )
-            { // CRC incorrect
-                _reception = INCORRECT_PACKET;
-                state = 3;
+            //CrcOnPayload?
+            if (bitRead(readRegister(REG_HOP_CHANNEL),6)) {
+
+                if ( (bitRead(value, 5) == 0) ) {
+                    // packet received & CRC correct
+                    p_received = true;	// packet correctly received
+                    _reception = CORRECT_PACKET;
 #if (SX1272_debug_mode > 0)
-                Serial.println(F("** The CRC is incorrect **"));
-                Serial.println();
+                    Serial.println(F("** The CRC is correct **"));
 #endif
+                }
+                else {
+                    _reception = INCORRECT_PACKET;
+                    state = 3;
+#if (SX1272_debug_mode > 0)
+                    Serial.println(F("** The CRC is incorrect **"));
+#endif
+                }
             }
+            else {
+                  // as CRC is not set we suppose that CRC is correct
+                  p_received = true;	// packet correctly received
+                  _reception = CORRECT_PACKET;
+#if (SX1272_debug_mode > 0)
+                  Serial.println(F("## Packet supposed to be correct as CrcOnPayload is off at transmitter ##"));
+#endif
+             }
         }
-        //writeRegister(REG_OP_MODE, LORA_STANDBY_MODE);	// Setting standby LoRa mode
+        writeRegister(REG_OP_MODE, LORA_STANDBY_MODE);	// Setting standby LoRa mode
     }
     else
     { // FSK mode
@@ -4636,6 +4704,15 @@ int8_t SX1272::getPacket(uint16_t wait)
         // modified by C. Pham
         if (!_rawFormat) {
             packet_received.type = readRegister(REG_FIFO);		// Reading second byte of the received packet
+            // check packet type to discard unknown packet type
+            if ( (packet_received.type & PKT_TYPE_MASK != PKT_TYPE_DATA) && (packet_received.type & PKT_TYPE_MASK != PKT_TYPE_ACK) ) {
+                _reception = INCORRECT_PACKET_TYPE;
+                state = 3;
+#if (SX1272_debug_mode > 0)
+                Serial.println(F("** The packet type is incorrect **"));
+#endif            	
+				return state;	
+            }             
             packet_received.src = readRegister(REG_FIFO);		// Reading second byte of the received packet
             packet_received.packnum = readRegister(REG_FIFO);	// Reading third byte of the received packet
             //packet_received.length = readRegister(REG_FIFO);	// Reading fourth byte of the received packet
@@ -4678,13 +4755,13 @@ int8_t SX1272::getPacket(uint16_t wait)
             Serial.print(F("Destination: "));
             Serial.println(packet_received.dst);			 	// Printing destination
             Serial.print(F("Type: "));
-            Serial.println(packet_received.type);			 	// Printing source
+            Serial.println(packet_received.type);			 	// Printing type
             Serial.print(F("Source: "));
             Serial.println(packet_received.src);			 	// Printing source
             Serial.print(F("Packet number: "));
             Serial.println(packet_received.packnum);			// Printing packet number
-            //Serial.print(F("Packet length: "));
-            //Serial.println(packet_received.length);			// Printing packet length
+            Serial.print(F("Packet length: "));
+            Serial.println(packet_received.length);			// Printing packet length
             Serial.print(F("Data: "));
             for(unsigned int i = 0; i < _payloadlength; i++)
             {
@@ -4712,7 +4789,7 @@ int8_t SX1272::getPacket(uint16_t wait)
     }
     else
     {
-        state = 1;
+        //state = 1;
         if( (_reception == INCORRECT_PACKET) && (_retries < _maxRetries) )
         {
             // comment by C. Pham
@@ -4793,7 +4870,7 @@ int8_t SX1272::setDestination(uint8_t dest)
 uint8_t SX1272::setTimeout()
 {
     uint8_t state = 2;
-    uint16_t delay;
+    //uint16_t delay;
 
 #if (SX1272_debug_mode > 1)
     Serial.println();
@@ -5708,6 +5785,7 @@ uint8_t SX1272::sendPacketTimeout(uint8_t dest, uint8_t *payload, uint16_t lengt
 #endif
 
     state = truncPayload(length16);
+
     if( state == 0 )
     {
         state_f = setPacket(dest, payload);	// Setting a packet with 'dest' destination
@@ -6180,56 +6258,56 @@ uint8_t SX1272::getACK(uint16_t wait)
                             else
                             {
                                 state = 1;
-                                //#if (SX1272_debug_mode > 0)
+                                #if (SX1272_debug_mode > 0)
                                 Serial.println(F("** N-ACK received **"));
                                 Serial.println();
-                                //#endif
+                                #endif
                             }
                         }
                         else
                         {
                             state = 1;
-                            //#if (SX1272_debug_mode > 0)
+                            #if (SX1272_debug_mode > 0)
                             Serial.println(F("** ACK length incorrectly received **"));
                             Serial.println();
-                            //#endif
+                            #endif
                         }
                     }
                     else
                     {
                         state = 1;
-                        //#if (SX1272_debug_mode > 0)
+                        #if (SX1272_debug_mode > 0)
                         Serial.println(F("** ACK number incorrectly received **"));
                         Serial.println();
-                        //#endif
+                        #endif
                     }
                 }
                 else
                 {
                     state = 1;
-                    //#if (SX1272_debug_mode > 0)
+                    #if (SX1272_debug_mode > 0)
                     Serial.println(F("** ACK source incorrectly received **"));
                     Serial.println();
-                    //#endif
+                    #endif
                 }
             }
         }
         else
         {
             state = 1;
-            //#if (SX1272_debug_mode > 0)
+            #if (SX1272_debug_mode > 0)
             Serial.println(F("** ACK destination incorrectly received **"));
             Serial.println();
-            //#endif
+            #endif
         }
     }
     else
     {
         state = 1;
-        //#if (SX1272_debug_mode > 0)
+        #if (SX1272_debug_mode > 0)
         Serial.println(F("** ACK lost **"));
         Serial.println();
-        //#endif
+        #endif
     }
     clearFlags();	// Initializing flags
     return state;
@@ -6711,17 +6789,34 @@ uint16_t SX1272::getToA(uint8_t pl) {
     return _currentToA;
 }
 
+void SX1272::CarrierSense(uint8_t cs) {
+    
+    if (cs==1)
+    	CarrierSense1();
+    
+    if (cs==2)
+    	CarrierSense2(); 
+    	
+    if (cs==3)
+    	CarrierSense3();     	
+}    	  	   	
+
 // need to set _send_cad_number to a value > 0
 // we advise using _send_cad_number=3 for a SIFS and _send_cad_number=9 for a DIFS
 // prior to send any data
-// TODO: have a maximum number of trials
-void SX1272::CarrierSense() {
+void SX1272::CarrierSense1() {
 
     int e;
     bool carrierSenseRetry=false;
+    uint8_t retries=3;
+    uint8_t DIFSretries=8;
 
+  	Serial.print(F("--> CS1\n")); 
+  	
     if (_send_cad_number && _enableCarrierSense) {
+
         do {
+            DIFSretries=8;
             do {
 
                 // check for free channel (SIFS/DIFS)
@@ -6729,7 +6824,7 @@ void SX1272::CarrierSense() {
                 e = doCAD(_send_cad_number);
                 _endDoCad=millis();
 
-                Serial.print(F("--> CAD duration "));
+                Serial.print(F("--> CAD "));
                 Serial.print(_endDoCad-_startDoCad);
                 Serial.println();
 
@@ -6740,7 +6835,7 @@ void SX1272::CarrierSense() {
                         // wait for random number of CAD
                         uint8_t w = random(1,8);
 
-                        Serial.print(F("--> waiting for "));
+                        Serial.print(F("--> wait for "));
                         Serial.print(w);
                         Serial.print(F(" CAD = "));
                         Serial.print(sx1272_CAD_value[_loraMode]*w);
@@ -6753,27 +6848,27 @@ void SX1272::CarrierSense() {
                         e = doCAD(_send_cad_number);
                         _endDoCad=millis();
 
-                        Serial.print(F("--> CAD duration "));
+                        Serial.print(F("--> CAD "));
                         Serial.print(_endDoCad-_startDoCad);
                         Serial.println();
 
                         if (!e)
                             Serial.print(F("OK2"));
                         else
-                            Serial.print(F("###2"));
+                            Serial.print(F("#2"));
 
                         Serial.println();
                     }
                 }
                 else {
-                    Serial.print(F("###1\n"));
+                    Serial.print(F("#1\n"));
 
                     // wait for random number of DIFS
                     uint8_t w = random(1,8);
 
-                    Serial.print(F("--> waiting for "));
+                    Serial.print(F("--> wait for "));
                     Serial.print(w);
-                    Serial.print(F(" DIFS (DIFS=3SIFS) = "));
+                    Serial.print(F(" DIFS=3SIFS= "));
                     Serial.print(sx1272_SIFS_value[_loraMode]*3*w);
                     Serial.println();
 
@@ -6782,30 +6877,24 @@ void SX1272::CarrierSense() {
                     Serial.print(F("--> retry\n"));
                 }
 
-            } while (e);
-
+            } while (e && --DIFSretries);
+		
             // CAD is OK, but need to check RSSI
             if (_RSSIonSend) {
 
                 e=getRSSI();
-
-                uint8_t rssi_retry_count=10;
+                uint8_t rssi_retry_count=8;
 
                 if (!e) {
 
-                    Serial.print(F("--> RSSI "));
-                    Serial.print(_RSSI);
-                    Serial.println();
-
-                    while (_RSSI > -90 && rssi_retry_count) {
-
-                        delay(1);
+                    do {
                         getRSSI();
                         Serial.print(F("--> RSSI "));
                         Serial.print(_RSSI);
                         Serial.println();
                         rssi_retry_count--;
-                    }
+                        delay(1);
+                    } while (_RSSI > -90 && rssi_retry_count);
                 }
                 else
                     Serial.print(F("--> RSSI error\n"));
@@ -6815,8 +6904,249 @@ void SX1272::CarrierSense() {
                 else
                     carrierSenseRetry=false;
             }
+        } while (carrierSenseRetry && --retries);
+    }
+}
 
-        } while (carrierSenseRetry);
+void SX1272::CarrierSense2() {
+
+	int e;
+	bool carrierSenseRetry=false;  
+	uint8_t foundBusyDuringDIFSafterBusyState=0;
+    uint8_t retries=3;
+    uint8_t DIFSretries=8;
+	uint8_t n_collision=0;
+	// upper bound of the random backoff timer
+	uint8_t W=2;
+	uint32_t max_toa = sx1272.getToA(MAX_LENGTH);
+
+	// do CAD for DIFS=9CAD
+	Serial.print(F("--> CS2\n")); 
+  
+	if (_send_cad_number && _enableCarrierSense) {
+    	  
+		do { 
+            DIFSretries=8;
+			do {
+                //D f W
+                //2 2 4
+                //3 3 8
+                //4 4 16
+                //5 5 16
+                //6 6 16
+                //...
+
+                if (foundBusyDuringDIFSafterBusyState>1 && foundBusyDuringDIFSafterBusyState<5)
+                    W=W*2;
+
+                // check for free channel (SIFS/DIFS)
+                _startDoCad=millis();
+                e = sx1272.doCAD(_send_cad_number);
+                _endDoCad=millis();
+
+                Serial.print(F("--> DIFS "));
+                Serial.print(_endDoCad-_startDoCad);
+                Serial.println();
+
+                // successull SIFS/DIFS
+                if (!e) {
+
+                    // previous collision detected
+                    if (n_collision) {
+
+                        Serial.print(F("--> count for "));
+                        // count for random number of CAD/SIFS/DIFS?
+                        // SIFS=3CAD
+                        // DIFS=9CAD
+                        uint8_t w = random(0,W*_send_cad_number);
+
+                        Serial.println(w);
+
+                        int busyCount=0;
+                        bool nowBusy=false;
+
+                        do {
+
+                            if (nowBusy)
+                                e = sx1272.doCAD(_send_cad_number);
+                            else
+                                e = sx1272.doCAD(1);
+
+                            if (nowBusy && e) {
+                                Serial.print(F("#"));
+                                busyCount++;
+                            }
+                            else if (nowBusy && !e) {
+                                Serial.print(F("|"));
+                                nowBusy=false;
+                            }
+                            else if (!e) {
+                                w--;
+                                Serial.print(F("-"));
+                            }
+                            else {
+                                Serial.print(F("*"));
+                                nowBusy=true;
+                                busyCount++;
+                            }
+
+                        } while (w);
+
+                        // if w==0 then we exit and
+                        // the packet will be sent
+                        Serial.println();
+                        Serial.print(F("--> busy during "));
+                        Serial.println(busyCount);
+                    }
+                    else {
+                        Serial.println(F("OK1"));
+
+                        if (_extendedIFS)  {
+                            // wait for random number of CAD
+                            uint8_t w = random(1,8);
+
+                            Serial.print(F("--> extended wait for "));
+                            Serial.println(w);
+                            Serial.print(F(" CAD = "));
+                            Serial.println(sx1272_CAD_value[_loraMode]*w);
+
+                            delay(sx1272_CAD_value[_loraMode]*w);
+
+                            // check for free channel (SIFS/DIFS) once again
+                            _startDoCad=millis();
+                            e = sx1272.doCAD(_send_cad_number);
+                            _endDoCad=millis();
+
+                            Serial.print(F("--> CAD "));
+                            Serial.println(_endDoCad-_startDoCad);
+
+                            if (!e)
+                                Serial.println("OK2");
+                            else
+                                Serial.println("#2");
+                        }
+                    }
+                }
+                else {
+                    n_collision++;
+                    foundBusyDuringDIFSafterBusyState++;
+                    Serial.print(F("###"));
+                    Serial.println(n_collision);
+
+                    Serial.println(F("--> CAD until clear"));
+
+                    int busyCount=0;
+
+                    _startDoCad=millis();
+                    do {
+
+                        e = sx1272.doCAD(1);
+
+                        if (e) {
+                            Serial.print(F("R"));
+                            busyCount++;
+                        }
+                    } while (e && (millis()-_startDoCad < 2*max_toa));
+
+                    _endDoCad=millis();
+
+                    Serial.println();
+                    Serial.print(F("--> busy during "));
+                    Serial.println(busyCount);
+
+                    Serial.print(F("--> wait "));
+                    Serial.println(_endDoCad-_startDoCad);
+
+                    // to perform a new DIFS
+                    Serial.println(F("--> retry"));
+                    e=1;
+                }
+			} while (e && --DIFSretries);
+	
+			// CAD is OK, but need to check RSSI
+			if (_RSSIonSend) {
+
+				e=getRSSI();
+				uint8_t rssi_retry_count=8;
+
+				if (!e) {
+
+                    do {
+						getRSSI();
+						Serial.print(F("--> RSSI "));
+						Serial.print(_RSSI);
+						Serial.println();
+						rssi_retry_count--;
+                        delay(1);
+                    } while (_RSSI > -90 && rssi_retry_count);
+				}
+				else
+					Serial.print(F("--> RSSI error\n"));
+
+				if (!rssi_retry_count)
+					carrierSenseRetry=true;
+				else
+					carrierSenseRetry=false;
+			}
+		} while (carrierSenseRetry && --retries);  
+  	}
+}
+
+void SX1272::CarrierSense3() {
+
+    int e;
+    bool carrierSenseRetry=false;
+    uint8_t n_collision=0;
+    uint8_t retries=3;
+    uint8_t n_cad=9;
+    uint32_t max_toa = sx1272.getToA(MAX_LENGTH);
+
+    Serial.println(F("--> CS3"));
+
+    //unsigned long end_carrier_sense=0;
+
+    if (_send_cad_number && _enableCarrierSense) {
+        do {
+            Serial.print(F("--> CAD for MaxToa="));
+            Serial.println(max_toa);
+
+            //end_carrier_sense=millis()+(max_toa/n_cad)*(n_cad-1);
+
+            for (int i=0; i<n_cad; i++) {
+                _startDoCad=millis();
+                e = sx1272.doCAD(1);
+                _endDoCad=millis();
+
+                if (!e) {
+                    Serial.print(_endDoCad);
+                    Serial.print(F(" 0 "));
+                    Serial.print(sx1272._RSSI);
+                    Serial.print(F(" "));
+                    Serial.println(_endDoCad-_startDoCad);
+                }
+                else
+                    continue;
+
+                // wait in order to have n_cad CAD operations during max_toa
+                delay(max_toa/(n_cad-1)-(millis()-_startDoCad));
+            }
+
+            if (e) {
+                n_collision++;
+                Serial.print(F("#"));
+                Serial.println(n_collision);
+
+                Serial.print(F("Busy. Wait MaxToA="));
+                Serial.println(max_toa);
+                delay(max_toa);
+                // to perform a new max_toa waiting
+                Serial.println(F("--> retry"));
+                carrierSenseRetry=true;
+            }
+            else
+                carrierSenseRetry=false;
+
+        } while (carrierSenseRetry && --retries);
     }
 }
 
@@ -6974,11 +7304,15 @@ int8_t SX1272::setPowerDBM(uint8_t dbm) {
         writeRegister(REG_OP_MODE, FSK_STANDBY_MODE);
     }
 
+	if (dbm == 20) {
+		return setPower('X');
+	}
+	
     if (dbm > 14)
         return state;
-
-    // disable high power output in all other cases
-    writeRegister(RegPaDacReg, 0x84);
+      	
+	// disable high power output in all other cases
+	writeRegister(RegPaDacReg, 0x84);
 
     if (dbm > 10)
         // set RegOcp for OcpOn and OcpTrim
@@ -7099,6 +7433,22 @@ long SX1272::removeToA(uint16_t toa) {
     }
 
     return _remainingToA;
+}
+
+int8_t SX1272::setFreqHopOn() {
+    
+    double bw=0.0;
+    bw=(_bandwidth==BW_125)?125e3:((_bandwidth==BW_250)?250e3:500e3);
+    // Symbol rate : time for one symbol (secs)
+    double rs = bw / ( 1 << _spreadingFactor);
+    double ts = 1 / rs;
+    
+    return 0;        
+}
+
+void SX1272::setCSPin(uint8_t cs) {
+	//need to call this function before the ON() function
+	_SX1272_SS=cs;
 }
 
 SX1272 sx1272 = SX1272();

@@ -1,8 +1,8 @@
 /*
- *  temperature sensor on analog 8 to test the LoRa gateway
+ *  temperature sensor on analog A0 to test the LoRa gateway
  *  extended version with AES and custom Carrier Sense features
  *  
- *  Copyright (C) 2016 Congduc Pham, University of Pau, France
+ *  Copyright (C) 2016-2018 Congduc Pham, University of Pau, France
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -18,7 +18,7 @@
  *  along with the program.  If not, see <http://www.gnu.org/licenses/>.
  *
  *****************************************************************************
- * last update: Nov. 26th by C. Pham
+ * last update: Feb 17th, 2018 by C. Pham
  */
 #include <SPI.h> 
 // Include the SX1272
@@ -62,6 +62,8 @@ const uint32_t DEFAULT_CHANNEL=CH_10_868;
 #endif
 #elif defined BAND900
 const uint32_t DEFAULT_CHANNEL=CH_05_900;
+// For HongKong, Japan, Malaysia, Singapore, Thailand, Vietnam: 920.36MHz     
+//const uint32_t DEFAULT_CHANNEL=CH_08_900;
 #elif defined BAND433
 const uint32_t DEFAULT_CHANNEL=CH_00_433;
 #endif
@@ -77,43 +79,72 @@ const uint32_t DEFAULT_CHANNEL=CH_00_433;
 ///////////////////////////////////////////////////////////////////
 // COMMENT OR UNCOMMENT TO CHANGE FEATURES. 
 // ONLY IF YOU KNOW WHAT YOU ARE DOING!!! OTHERWISE LEAVE AS IT IS
-#if not defined _VARIANT_ARDUINO_DUE_X_ && not defined __SAMD21G18A__
 #define WITH_EEPROM
-#endif
 #define WITH_APPKEY
-#define FLOAT_TEMP
-#define NEW_DATA_FIELD
+//if you are low on program memory, comment STRING_LIB to save about 2K
+//#define STRING_LIB
 #define LOW_POWER
 #define LOW_POWER_HIBERNATE
-#define CUSTOM_CS
-//#define LORA_LAS
 #define WITH_AES
 //#define LORAWAN
 //#define TO_LORAWAN_GW
 //#define WITH_ACK
+//this will enable a receive window after every transmission
+#define WITH_RCVW
+///////////////////////////////////////////////////////////////////
+
+///////////////////////////////////////////////////////////////////
+// ADD HERE OTHER PLATFORMS THAT DO NOT SUPPORT EEPROM NOR LOW POWER
+#if defined ARDUINO_SAM_DUE || defined __SAMD21G18A__
+#undef WITH_EEPROM
+#endif
+
+#if defined ARDUINO_SAM_DUE
+#undef LOW_POWER
+#endif
 ///////////////////////////////////////////////////////////////////
 
 ///////////////////////////////////////////////////////////////////
 // CHANGE HERE THE LORA MODE, NODE ADDRESS 
 #define LORAMODE  1
-#define node_addr 6
+uint8_t node_addr=6;
 //////////////////////////////////////////////////////////////////
 
 ///////////////////////////////////////////////////////////////////
-// CHANGE HERE THE THINGSPEAK FIELD BETWEEN 1 AND 4
-#define field_index 3
+// CHANGE HERE THE THINGSPEAK FIELD BETWEEN 1 AND 8
+#define field_index 1
 ///////////////////////////////////////////////////////////////////
 
 ///////////////////////////////////////////////////////////////////
 // CHANGE HERE THE READ PIN AND THE POWER PIN FOR THE TEMP. SENSOR
 #define TEMP_PIN_READ  A0
-// use digital 8 to power the temperature sensor if needed
-#define TEMP_PIN_POWER 8
+// use digital 9 to power the temperature sensor if needed
+#define TEMP_PIN_POWER 9
 ///////////////////////////////////////////////////////////////////
 
 ///////////////////////////////////////////////////////////////////
 // CHANGE HERE THE TIME IN MINUTES BETWEEN 2 READING & TRANSMISSION
-unsigned int idlePeriodInMin = 10;
+unsigned int idlePeriodInMin = 30;
+///////////////////////////////////////////////////////////////////
+
+///////////////////////////////////////////////////////////////////
+// COMMENT THIS LINE IF YOU WANT TO DYNAMICALLY SET THE NODE'S ADDR 
+// OR SOME OTHER PARAMETERS BY REMOTE RADIO COMMANDS (WITH_RCVW)
+// LEAVE THIS LINE UNCOMMENTED IF YOU WANT TO USE THE DEFAULT VALUE
+// AND CONFIGURE YOUR DEVICE BY CHANGING MANUALLY THESE VALUES IN 
+// THE SKETCH.
+//
+// ONCE YOU HAVE FLASHED A BOARD WITHOUT FORCE_DEFAULT_VALUE, YOU 
+// WILL BE ABLE TO DYNAMICALLY CONFIGURE IT AND SAVE THIS CONFIGU-
+// RATION INTO EEPROM. ON RESET, THE BOARD WILL USE THE SAVED CON-
+// FIGURATION.
+
+// IF YOU WANT TO REINITIALIZE A BOARD, YOU HAVE TO FIRST FLASH IT 
+// WITH FORCE_DEFAULT_VALUE, WAIT FOR ABOUT 10s SO THAT IT CAN BOOT
+// AND FLASH IT AGAIN WITHOUT FORCE_DEFAULT_VALUE. THE BOARD WILL 
+// THEN USE THE DEFAULT CONFIGURATION UNTIL NEXT CONFIGURATION.
+
+#define FORCE_DEFAULT_VALUE
 ///////////////////////////////////////////////////////////////////
 
 #ifdef WITH_APPKEY
@@ -123,6 +154,11 @@ unsigned int idlePeriodInMin = 10;
 uint8_t my_appKey[4]={5, 6, 7, 8};
 ///////////////////////////////////////////////////////////////////
 #endif
+
+///////////////////////////////////////////////////////////////////
+// IF YOU SEND A LONG STRING, INCREASE THE SIZE OF MESSAGE
+uint8_t message[80];
+///////////////////////////////////////////////////////////////////
 
 // we wrapped Serial.println to support the Arduino Zero or M0
 #if defined __SAMD21G18A__ && not defined ARDUINO_SAMD_FEATHER_M0
@@ -151,7 +187,7 @@ uint8_t my_appKey[4]={5, 6, 7, 8};
 #define NB_RETRIES 2
 #endif
 
-#if defined ARDUINO_AVR_PRO || defined ARDUINO_AVR_MINI || defined __MK20DX256__ || defined __MKL26Z64__ || defined __MK64FX512__ || defined __MK66FX1M0__ || defined __SAMD21G18A__
+#if defined ARDUINO_AVR_PRO || defined ARDUINO_AVR_MINI || defined ARDUINO_SAM_DUE || defined __MK20DX256__ || defined __MKL26Z64__ || defined __MK64FX512__ || defined __MK66FX1M0__ || defined __SAMD21G18A__
   // if you have a Pro Mini running at 5V, then change here
   // these boards work in 3.3V
   // Nexus board from Ideetron is a Mini
@@ -174,7 +210,7 @@ uint8_t my_appKey[4]={5, 6, 7, 8};
 #include <Snooze.h>
 SnoozeTimer timer;
 SnoozeBlock sleep_config(timer);
-#else
+#else // for all other boards based on ATMega168, ATMega328P, ATMega32U4, ATMega2560, ATMega256RFR2, ATSAMD21G18A
 #define LOW_POWER_PERIOD 8
 // you need the LowPower library from RocketScream
 // https://github.com/rocketscream/Low-Power
@@ -215,16 +251,7 @@ uint16_t Frame_Counter_Up = 0x0000;
 unsigned char Direction = 0x00;
 #endif
 
-#ifdef LORA_LAS
-#include "LoRaActivitySharing.h"
-// acting as an end-device
-LASDevice loraLAS(node_addr,LAS_DEFAULT_ALPHA,DEFAULT_DEST_ADDR);
-#endif
-
-double temp;
 unsigned long nextTransmissionTime=0L;
-char float_str[20];
-uint8_t message[100];
 
 #ifdef TO_LORAWAN_GW
 int loraMode=1;
@@ -238,138 +265,41 @@ struct sx1272config {
   uint8_t flag1;
   uint8_t flag2;
   uint8_t seq;
+  uint8_t addr;
+  unsigned int idle_period;  
+  uint8_t overwrite;
   // can add other fields such as LoRa mode,...
 };
 
 sx1272config my_sx1272config;
 #endif
 
-// receive window
-uint16_t w_timer=1000;
+#ifdef WITH_RCVW
 
-#ifdef CUSTOM_CS
-unsigned long startDoCad, endDoCad;
-bool extendedIFS=true;
-bool RSSIonSend=true;
-uint8_t SIFS_cad_number;
-uint8_t send_cad_number;
-uint8_t SIFS_value[11]={0, 183, 94, 44, 47, 23, 24, 12, 12, 7, 4};
-uint8_t CAD_value[11]={0, 62, 31, 16, 16, 8, 9, 5, 3, 1, 1};
+// will wait for 5s before opening the rcv window
+#define DELAY_BEFORE_RCVW 5000
 
-// we could use the CarrierSense function added in the SX1272 library, but it is more convenient to duplicate it here
-// so that we could easily modify it for testing
-void CarrierSense() {
+long getCmdValue(int &i, char* strBuff=NULL) {
   
-  bool carrierSenseRetry=false;
-  int e;
-  
-  if (send_cad_number) {
-    do { 
-      do {
-        
-        // check for free channel (SIFS/DIFS)        
-        startDoCad=millis();
-        e = sx1272.doCAD(send_cad_number);
-        endDoCad=millis();
-        
-        PRINT_CSTSTR("%s","--> CAD duration ");
-        PRINT_VALUE("%ld",endDoCad-startDoCad);
-        PRINTLN;
-        
-        if (!e) {
-          PRINT_CSTSTR("%s","OK1\n");
-          
-          if (extendedIFS)  {          
-            // wait for random number of CAD
-#ifdef ARDUINO                
-            uint8_t w = random(1,8);
-#else
-            uint8_t w = rand() % 8 + 1;
-#endif
-  
-            PRINT_CSTSTR("%s","--> waiting for ");
-            PRINT_VALUE("%d",w);
-            PRINT_CSTSTR("%s"," CAD = ");
-            PRINT_VALUE("%d",CAD_value[loraMode]*w);
-            PRINTLN;
-            
-            delay(CAD_value[loraMode]*w);
-            
-            // check for free channel (SIFS/DIFS) once again
-            startDoCad=millis();
-            e = sx1272.doCAD(send_cad_number);
-            endDoCad=millis();
- 
-            PRINT_CSTSTR("%s","--> CAD duration ");
-            PRINT_VALUE("%ld",endDoCad-startDoCad);
-            PRINTLN;
-        
-            if (!e)
-              PRINT_CSTSTR("%s","OK2");            
-            else
-              PRINT_CSTSTR("%s","###2");
-            
-            PRINTLN;
-          }              
-        }
-        else {
-          PRINT_CSTSTR("%s","###1\n");  
-
-          // wait for random number of DIFS
-#ifdef ARDUINO                
-          uint8_t w = random(1,8);
-#else
-          uint8_t w = rand() % 8 + 1;
-#endif
-          
-          PRINT_CSTSTR("%s","--> waiting for ");
-          PRINT_VALUE("%d",w);
-          PRINT_CSTSTR("%s"," DIFS (DIFS=3SIFS) = ");
-          PRINT_VALUE("%d",SIFS_value[loraMode]*3*w);
-          PRINTLN;
-          
-          delay(SIFS_value[loraMode]*3*w);
-          
-          PRINT_CSTSTR("%s","--> retry\n");
-        }
-
-      } while (e);
+    char seqStr[7]="******";
     
-      // CAD is OK, but need to check RSSI
-      if (RSSIonSend) {
+    int j=0;
+    // character '#' will indicate end of cmd value
+    while ((char)message[i]!='#' && (i < strlen((char*)message)) && j<strlen(seqStr)) {
+            seqStr[j]=(char)message[i];
+            i++;
+            j++;
+    }
     
-          e=sx1272.getRSSI();
-          
-          uint8_t rssi_retry_count=10;
-          
-          if (!e) {
-          
-            PRINT_CSTSTR("%s","--> RSSI ");
-            PRINT_VALUE("%d", sx1272._RSSI);
-            PRINTLN;
-            
-            while (sx1272._RSSI > -90 && rssi_retry_count) {
-              
-              delay(1);
-              sx1272.getRSSI();
-              PRINT_CSTSTR("%s","--> RSSI ");
-              PRINT_VALUE("%d",  sx1272._RSSI);       
-              PRINTLN; 
-              rssi_retry_count--;
-            }
-          }
-          else
-            PRINT_CSTSTR("%s","--> RSSI error\n");
-        
-          if (!rssi_retry_count)
-            carrierSenseRetry=true;  
-          else
-      carrierSenseRetry=false;            
-      }
-      
-    } while (carrierSenseRetry);  
-  }
-}
+    // put the null character at the end
+    seqStr[j]='\0';
+    
+    if (strBuff) {
+            strcpy(strBuff, seqStr);        
+    }
+    else
+            return (atol(seqStr));
+}   
 #endif
 
 void setup()
@@ -400,27 +330,59 @@ void setup()
   PRINT_CSTSTR("%s","LoRa temperature sensor, extended version\n");
 
 #ifdef ARDUINO_AVR_PRO
-  PRINT_CSTSTR("%s","Arduino Pro Mini detected\n");
+  PRINT_CSTSTR("%s","Arduino Pro Mini detected\n");  
 #endif
-
 #ifdef ARDUINO_AVR_NANO
-  PRINT_CSTSTR("%s","Arduino Nano detected\n");
+  PRINT_CSTSTR("%s","Arduino Nano detected\n");   
 #endif
-
 #ifdef ARDUINO_AVR_MINI
-  PRINT_CSTSTR("%s","Arduino MINI/Nexus detected\n");
+  PRINT_CSTSTR("%s","Arduino MINI/Nexus detected\n");  
 #endif
-
+#ifdef ARDUINO_AVR_MEGA2560
+  PRINT_CSTSTR("%s","Arduino Mega2560 detected\n");  
+#endif
+#ifdef ARDUINO_SAM_DUE
+  PRINT_CSTSTR("%s","Arduino Due detected\n");  
+#endif
+#ifdef __MK66FX1M0__
+  PRINT_CSTSTR("%s","Teensy36 MK66FX1M0 detected\n");
+#endif
+#ifdef __MK64FX512__
+  PRINT_CSTSTR("%s","Teensy35 MK64FX512 detected\n");
+#endif
 #ifdef __MK20DX256__
-  PRINT_CSTSTR("%s","Teensy31/32 detected\n");
+  PRINT_CSTSTR("%s","Teensy31/32 MK20DX256 detected\n");
 #endif
-
 #ifdef __MKL26Z64__
-  PRINT_CSTSTR("%s","TeensyLC detected\n");
+  PRINT_CSTSTR("%s","TeensyLC MKL26Z64 detected\n");
+#endif
+#if defined ARDUINO_SAMD_ZERO && not defined ARDUINO_SAMD_FEATHER_M0
+  PRINT_CSTSTR("%s","Arduino M0/Zero detected\n");
+#endif
+#ifdef ARDUINO_AVR_FEATHER32U4 
+  PRINT_CSTSTR("%s","Adafruit Feather32U4 detected\n"); 
+#endif
+#ifdef  ARDUINO_SAMD_FEATHER_M0
+  PRINT_CSTSTR("%s","Adafruit FeatherM0 detected\n");
 #endif
 
+// See http://www.nongnu.org/avr-libc/user-manual/using_tools.html
+// for the list of define from the AVR compiler
+
+#ifdef __AVR_ATmega328P__
+  PRINT_CSTSTR("%s","ATmega328P detected\n");
+#endif 
+#ifdef __AVR_ATmega32U4__
+  PRINT_CSTSTR("%s","ATmega32U4 detected\n");
+#endif 
+#ifdef __AVR_ATmega2560__
+  PRINT_CSTSTR("%s","ATmega2560 detected\n");
+#endif 
 #ifdef __SAMD21G18A__ 
-  PRINT_CSTSTR("%s","Arduino M0/Zero detected\n");
+  PRINT_CSTSTR("%s","SAMD21G18A ARM Cortex-M0+ detected\n");
+#endif
+#ifdef __SAM3X8E__ 
+  PRINT_CSTSTR("%s","SAM3X8E ARM Cortex-M3 detected\n");
 #endif
 
   // Power ON the module
@@ -431,7 +393,7 @@ void setup()
   EEPROM.get(0, my_sx1272config);
 
   // found a valid config?
-  if (my_sx1272config.flag1==0x12 && my_sx1272config.flag2==0x34) {
+  if (my_sx1272config.flag1==0x12 && my_sx1272config.flag2==0x35) {
     PRINT_CSTSTR("%s","Get back previous sx1272 config\n");
 
     // set sequence number for SX1272 library
@@ -439,12 +401,55 @@ void setup()
     PRINT_CSTSTR("%s","Using packet sequence number of ");
     PRINT_VALUE("%d", sx1272._packetNumber);
     PRINTLN;
+
+#ifdef FORCE_DEFAULT_VALUE
+    PRINT_CSTSTR("%s","Forced to use default parameters\n");
+    my_sx1272config.flag1=0x12;
+    my_sx1272config.flag2=0x35;
+    my_sx1272config.seq=sx1272._packetNumber;
+    my_sx1272config.addr=node_addr;
+    my_sx1272config.idle_period=idlePeriodInMin;    
+    my_sx1272config.overwrite=0;
+    EEPROM.put(0, my_sx1272config);
+#else
+    // get back the node_addr
+    if (my_sx1272config.addr!=0 && my_sx1272config.overwrite==1) {
+      
+        PRINT_CSTSTR("%s","Used stored address\n");
+        node_addr=my_sx1272config.addr;        
+    }
+    else
+        PRINT_CSTSTR("%s","Stored node addr is null\n"); 
+
+    // get back the idle period
+    if (my_sx1272config.idle_period!=0 && my_sx1272config.overwrite==1) {
+      
+        PRINT_CSTSTR("%s","Used stored idle period\n");
+        idlePeriodInMin=my_sx1272config.idle_period;        
+    }
+    else
+        PRINT_CSTSTR("%s","Stored idle period is null\n");                 
+#endif  
+
+#ifdef WITH_AES
+    DevAddr[3] = (unsigned char)node_addr;
+#endif            
+    PRINT_CSTSTR("%s","Using node addr of ");
+    PRINT_VALUE("%d", node_addr);
+    PRINTLN;   
+
+    PRINT_CSTSTR("%s","Using idle period of ");
+    PRINT_VALUE("%d", idlePeriodInMin);
+    PRINTLN;     
   }
   else {
     // otherwise, write config and start over
     my_sx1272config.flag1=0x12;
-    my_sx1272config.flag2=0x34;
+    my_sx1272config.flag2=0x35;
     my_sx1272config.seq=sx1272._packetNumber;
+    my_sx1272config.addr=node_addr;
+    my_sx1272config.idle_period=idlePeriodInMin;
+    my_sx1272config.overwrite=0;
   }
 #endif
   
@@ -454,30 +459,6 @@ void setup()
   PRINT_VALUE("%d", e);
   PRINTLN;
 
-  if (loraMode==1)
-    w_timer=2500;
-    
-#ifdef LORA_LAS
-  loraLAS.setSIFS(loraMode);
-#endif
-
-#ifdef CUSTOM_CS
-  if (loraMode>7)
-    SIFS_cad_number=6;
-  else 
-    SIFS_cad_number=3;
-
-  // SIFS=3CAD and DIFS=3SIFS
-  // here we use a DIFS prior to data transmission
-  send_cad_number=3*SIFS_cad_number;
-
-#ifdef LOW_POWER
-  // TODO: with low power, when setting the radio module in sleep mode
-  // there seem to be some issue with RSSI reading
-  RSSIonSend=false;
-#endif
-      
-#else
   // enable carrier sense
   sx1272._enableCarrierSense=true;  
 #ifdef LOW_POWER
@@ -485,7 +466,6 @@ void setup()
   // there seem to be some issue with RSSI reading
   sx1272._RSSIonSend=false;
 #endif  
-#endif
 
   // Select frequency channel
   e = sx1272.setChannel(DEFAULT_CHANNEL);
@@ -528,15 +508,11 @@ void setup()
   // Print a success message
   PRINT_CSTSTR("%s","SX1272 successfully configured\n");
 
-#ifdef LORA_LAS
-  loraLAS.ON(LAS_ON_WRESET);
-#endif
-
   //printf_begin();
   delay(500);
 }
 
-#if not defined _VARIANT_ARDUINO_DUE_X_ && defined FLOAT_TEMP
+#ifndef STRING_LIB
 
 char *ftoa(char *a, double f, int precision)
 {
@@ -548,6 +524,9 @@ char *ftoa(char *a, double f, int precision)
  while (*a != '\0') a++;
  *a++ = '.';
  long desimal = abs((long)((f - heiltal) * p[precision]));
+ if (desimal < p[precision-1]) {
+  *a++ = '0';
+ } 
  itoa(desimal, a, 10);
  return ret;
 }
@@ -559,14 +538,8 @@ void loop(void)
   long endSend;
   uint8_t app_key_offset=0;
   int e;
-    
-#ifdef LORA_LAS  
-  // call periodically to be able to detect the start of a new cycle
-  loraLAS.checkCycle();
-#else
-  //if (loraLAS._has_init && (millis()-lastTransmissionTime > 120000)) {
-#endif
-
+  float temp;
+  
 #ifndef LOW_POWER
   // 600000+random(15,60)*1000
   if (millis() > nextTransmissionTime) {
@@ -581,23 +554,39 @@ void loop(void)
 #else
       int value = analogRead(TEMP_PIN_READ);
 #endif
-      
+
+      /////////////////////////////////////////////////////////////////////////////////////////////////////////////
       // change here how the temperature should be computed depending on your sensor type
       //  
-      temp = value*TEMP_SCALE/1024.0;
     
       PRINT_CSTSTR("%s","Reading ");
       PRINT_VALUE("%d", value);
       PRINTLN;
-      
-      //temp = temp - 0.5;
-      temp = temp / 10.0;
 
+      //LM35DZ
+      //the LM35DZ needs at least 4v as supply voltage
+      //can be used on 5v board
+      //temp = (value*TEMP_SCALE/1024.0)/10;
+
+      //TMP36
+      //the TMP36 can work with supply voltage of 2.7v-5.5v
+      //can be used on 3.3v board
+      //we use a 0.95 factor when powering with less than 3.3v, e.g. 3.1v in the average for instance
+      //this setting is for 2 AA batteries
+      temp = ((value*0.95*TEMP_SCALE/1024.0)-500)/10;      
+
+      // for testing
+      //temp = 22.45;
+        
       PRINT_CSTSTR("%s","Temp is ");
       PRINT_VALUE("%f", temp);
       PRINTLN;
 
-#if defined WITH_APPKEY && not defined WITH_AES
+      //
+      // 
+      // /////////////////////////////////////////////////////////////////////////////////////////////////////////// 
+      
+#if defined WITH_APPKEY && not defined LORAWAN
       app_key_offset = sizeof(my_appKey);
       // set the app key in the payload
       memcpy(message,my_appKey,app_key_offset);
@@ -605,34 +594,15 @@ void loop(void)
 
       uint8_t r_size;
 
-      // then use app_key_offset to skip the app key
-#ifdef _VARIANT_ARDUINO_DUE_X_
-#ifdef NEW_DATA_FIELD
-      r_size=sprintf((char*)message+app_key_offset, "\\!#%d#TC/%.2f", field_index, temp);
+      // the recommended format if now \!TC/22.5
+#ifdef STRING_LIB
+      r_size=sprintf((char*)message+app_key_offset,"\\!#%d#TC/%s",field_index,String(temp).c_str());
 #else
-      r_size=sprintf((char*)message+app_key_offset, "\\!#%d#%.2f", field_index, temp);
-#endif      
-#else
-    
-#ifdef FLOAT_TEMP
+      char float_str[10];
       ftoa(float_str,temp,2);
-
-#ifdef NEW_DATA_FIELD
-      r_size=sprintf((char*)message+app_key_offset, "\\!#%d#TC/%s", field_index, float_str);
-#else
       // this is for testing, uncomment if you just want to test, without a real temp sensor plugged
       //strcpy(float_str, "21.55567");
-      r_size=sprintf((char*)message+app_key_offset, "\\!#%d#%s", field_index, float_str);
-#endif
-      
-#else
-      
-#ifdef NEW_DATA_FIELD      
-      r_size=sprintf((char*)message+app_key_offset, "\\!#%d#TC/%d", field_index, (int)temp);   
-#else
-      r_size=sprintf((char*)message+app_key_offset, "\\!#%d#%d", field_index, (int)temp);
-#endif         
-#endif
+      r_size=sprintf((char*)message+app_key_offset,"\\!#%d#TC/%s",field_index,float_str);
 #endif
 
       PRINT_CSTSTR("%s","Sending ");
@@ -646,9 +616,8 @@ void loop(void)
       int pl=r_size+app_key_offset;
       
 #ifdef WITH_AES
-      // if encryption then we DO NOT use appkey
       //
-      PRINT_STR("%s",(char*)message);
+      PRINT_STR("%s",(char*)(message+app_key_offset));
       PRINTLN;
       PRINT_CSTSTR("%s","plain payload hex\n");
       for (int i=0; i<pl;i++) {
@@ -674,7 +643,7 @@ void loop(void)
 
       // with encryption, we use for the payload a LoRaWAN packet format to reuse available LoRaWAN encryption libraries
       //
-      unsigned char LORAWAN_Data[256];
+      unsigned char LORAWAN_Data[80];
       unsigned char LORAWAN_Package_Length;
       unsigned char MIC[4];
       //Unconfirmed data up
@@ -704,14 +673,14 @@ void loop(void)
       LORAWAN_Package_Length = 9;
       
       //Load Data
-      for(int i = 0; i < r_size; i++)
+      for(int i = 0; i < r_size+app_key_offset; i++)
       {
         // see that we don't take the appkey, just the encrypted data that starts that message[app_key_offset]
         LORAWAN_Data[LORAWAN_Package_Length + i] = message[i];
       }
     
       //Add data Lenth to package length
-      LORAWAN_Package_Length = LORAWAN_Package_Length + r_size;
+      LORAWAN_Package_Length = LORAWAN_Package_Length + r_size + app_key_offset;
     
       PRINT_CSTSTR("%s","calculate MIC with NwkSKey\n");
       //Calculate MIC
@@ -754,45 +723,24 @@ void loop(void)
       Frame_Counter_Up++;
 #endif
     
-#ifdef CUSTOM_CS
-      CarrierSense();
-#else
       sx1272.CarrierSense();
-#endif
-      
+
       startSend=millis();
 
+      uint8_t p_type=PKT_TYPE_DATA;
+      
 #ifdef WITH_AES
       // indicate that payload is encrypted
-      // DO NOT take into account appkey
-      sx1272.setPacketType(PKT_TYPE_DATA | PKT_FLAG_DATA_ENCRYPTED);
-#else
+      p_type = p_type | PKT_FLAG_DATA_ENCRYPTED;
+#endif
+
 #ifdef WITH_APPKEY
       // indicate that we have an appkey
-      sx1272.setPacketType(PKT_TYPE_DATA | PKT_FLAG_DATA_WAPPKEY);
-#else
-      // just a simple data packet
-      sx1272.setPacketType(PKT_TYPE_DATA);
+      p_type = p_type | PKT_FLAG_DATA_WAPPKEY;
 #endif
-#endif
-      
-#ifdef LORA_LAS
 
-      e = loraLAS.sendData(DEFAULT_DEST_ADDR, (uint8_t*)message, pl, 0,
-              LAS_FIRST_DATAPKT+LAS_LAST_DATAPKT, LAS_NOACK);
+      sx1272.setPacketType(p_type);
       
-      if (e==TOA_OVERUSE) {
-          PRINT_CSTSTR("%s","Not sent, TOA_OVERUSE\n");  
-      }
-      
-      if (e==LAS_LBT_ERROR) {
-          PRINT_CSTSTR("%s","LBT error\n");  
-      }      
-      
-      if (e==LAS_SEND_ERROR || e==LAS_ERROR) {
-          PRINT_CSTSTR("%s","Send error\n");  
-      }    
-#else 
       // Send message to the gateway and print the result
       // with the app key if this feature is enabled
 #ifdef WITH_ACK
@@ -815,7 +763,7 @@ void loop(void)
 #else
       e = sx1272.sendPacketTimeout(DEFAULT_DEST_ADDR, message, pl);
 #endif
-#endif    
+  
       endSend=millis();
 
 #ifdef LORAWAN
@@ -849,7 +797,139 @@ void loop(void)
       PRINT_VALUE("%d", e);
       PRINTLN;
 
-#ifdef LOW_POWER
+#ifdef WITH_RCVW
+      PRINT_CSTSTR("%s","Wait for ");
+      PRINT_VALUE("%d", DELAY_BEFORE_RCVW-1000);
+      PRINTLN;
+      //wait a bit
+      delay(DELAY_BEFORE_RCVW-1000);
+
+      PRINT_CSTSTR("%s","Wait for incoming packet\n");
+      // wait for incoming packets
+      e = sx1272.receivePacketTimeout(10000);
+    
+      if (!e) {
+         int i=0;
+         int cmdValue;
+         uint8_t tmp_length;
+
+         sx1272.getSNR();
+         sx1272.getRSSIpacket();
+         
+         tmp_length=sx1272._payloadlength;
+
+         sprintf((char*)message, "^p%d,%d,%d,%d,%d,%d,%d\n",
+                   sx1272.packet_received.dst,
+                   sx1272.packet_received.type,                   
+                   sx1272.packet_received.src,
+                   sx1272.packet_received.packnum, 
+                   tmp_length,
+                   sx1272._SNR,
+                   sx1272._RSSIpacket);
+                                   
+         PRINT_STR("%s",(char*)message);         
+         
+         for ( ; i<tmp_length; i++) {
+           PRINT_STR("%c",(char)sx1272.packet_received.data[i]);
+           
+           message[i]=(char)sx1272.packet_received.data[i];
+         }
+         
+         message[i]=(char)'\0';    
+         PRINTLN;
+         FLUSHOUTPUT;   
+
+        i=0;
+
+        // commands have following format /@A6#
+        //
+        if (message[i]=='/' && message[i+1]=='@') {
+    
+            PRINT_CSTSTR("%s","Parsing command\n");      
+            i=i+2;   
+
+            switch ((char)message[i]) {
+
+                  // set the node's address, /@A10# to set the address to 10 for instance
+                  case 'A': 
+
+                      i++;
+                      cmdValue=getCmdValue(i);
+                      
+                      // cannot set addr greater than 255
+                      if (cmdValue > 255)
+                              cmdValue = 255;
+                      // cannot set addr lower than 2 since 0 is broadcast and 1 is for gateway
+                      if (cmdValue < 2)
+                              cmdValue = node_addr;
+                      // set node addr        
+                      node_addr=cmdValue; 
+#ifdef WITH_AES
+                      DevAddr[3] = (unsigned char)node_addr;
+#endif
+                      
+                      PRINT_CSTSTR("%s","Set LoRa node addr to ");
+                      PRINT_VALUE("%d", node_addr);  
+                      PRINTLN;
+                      // Set the node address and print the result
+                      e = sx1272.setNodeAddress(node_addr);
+                      PRINT_CSTSTR("%s","Setting LoRa node addr: state ");
+                      PRINT_VALUE("%d",e);     
+                      PRINTLN;           
+
+#ifdef WITH_EEPROM
+                      // save new node_addr in case of reboot
+                      my_sx1272config.addr=node_addr;
+                      my_sx1272config.overwrite=1;
+                      EEPROM.put(0, my_sx1272config);
+#endif
+
+                      break;        
+
+                  // set the time between 2 transmissions, /@I10# to set to 10 minutes for instance
+                  case 'I': 
+
+                      i++;
+                      cmdValue=getCmdValue(i);
+
+                      // cannot set addr lower than 1 minute
+                      if (cmdValue < 1)
+                              cmdValue = idlePeriodInMin;
+                      // idlePeriodInMin      
+                      idlePeriodInMin=cmdValue; 
+                      
+                      PRINT_CSTSTR("%s","Set duty-cycle to ");
+                      PRINT_VALUE("%d", idlePeriodInMin);  
+                      PRINTLN;         
+
+#ifdef WITH_EEPROM
+                      // save new node_addr in case of reboot
+                      my_sx1272config.idle_period=idlePeriodInMin;
+                      my_sx1272config.overwrite=1;
+                      EEPROM.put(0, my_sx1272config);
+#endif
+
+                      break;  
+                            
+                  /////////////////////////////////////////////////////////////////////////////////////////////////////////////
+                  // add here new commands
+                  //  
+
+                  //
+                  /////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+                  default:
+      
+                    PRINT_CSTSTR("%s","Unrecognized cmd\n");       
+                    break;
+            }
+        }          
+      }
+      else
+        PRINT_CSTSTR("%s","No packet\n");
+#endif
+
+#if defined LOW_POWER && not defined _VARIANT_ARDUINO_DUE_X_
       PRINT_CSTSTR("%s","Switch to power saving mode\n");
 
       e = sx1272.setSleepMode();
@@ -864,7 +944,6 @@ void loop(void)
       
 #ifdef __SAMD21G18A__
       // For Arduino M0 or Zero we use the built-in RTC
-      //LowPower.standby();
       rtc.setTime(17, 0, 0);
       rtc.setDate(1, 1, 2000);
       rtc.setAlarmTime(17, idlePeriodInMin, 0);
@@ -873,6 +952,8 @@ void loop(void)
       rtc.enableAlarm(rtc.MATCH_HHMMSS);
       //rtc.attachInterrupt(alarmMatch);
       rtc.standbyMode();
+      
+      LowPower.standby();
 
       PRINT_CSTSTR("%s","SAMD21G18A wakes up from standby\n");      
       FLUSHOUTPUT
@@ -888,8 +969,8 @@ void loop(void)
           
       for (int i=0; i<nCycle; i++) {  
 
-#if defined ARDUINO_AVR_PRO || defined ARDUINO_AVR_NANO || ARDUINO_AVR_UNO || ARDUINO_AVR_MINI         
-          // ATmega328P, ATmega168
+#if defined ARDUINO_AVR_PRO || defined ARDUINO_AVR_NANO || defined ARDUINO_AVR_UNO || defined ARDUINO_AVR_MINI || defined __AVR_ATmega32U4__         
+          // ATmega328P, ATmega168, ATmega32U4
           LowPower.powerDown(SLEEP_8S, ADC_OFF, BOD_OFF);
           
           //LowPower.idle(SLEEP_8S, ADC_OFF, TIMER2_OFF, TIMER1_OFF, TIMER0_OFF, 
@@ -913,7 +994,7 @@ void loop(void)
           delay(LOW_POWER_PERIOD*1000);
 #endif                        
           PRINT_CSTSTR("%s",".");
-          FLUSHOUTPUT; 
+          FLUSHOUTPUT
           delay(10);                        
       }
       
@@ -928,31 +1009,6 @@ void loop(void)
       nextTransmissionTime=millis()+(unsigned long)idlePeriodInMin*60*1000+(unsigned long)random(15,60)*1000;
       PRINT_VALUE("%ld", nextTransmissionTime);
       PRINTLN;
-  }
-#endif
-
-#ifdef LORA_LAS
-  // open a receive window
-  // only if radio is on for receiving LAS control messages
-  if (loraLAS._isRadioOn) {
-      e = sx1272.receivePacketTimeout(w_timer);
-    
-      if (!e) {
-         uint8_t tmp_length;
-                   
-         if (loraLAS.isLASMsg(sx1272.packet_received.data)) {
-           
-           tmp_length=sx1272.packet_received.length-OFFSET_PAYLOADLENGTH;
-           
-           int v=loraLAS.handleLASMsg(sx1272.packet_received.src,
-                                      sx1272.packet_received.data,
-                                      tmp_length);
-           
-           if (v==DSP_DATA) {
-              PRINT_CSTSTR("%s","Strange to receive data from LR-BS\n");
-           }
-         }  
-      }
   }
 #endif
 }

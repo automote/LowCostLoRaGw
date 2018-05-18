@@ -1,8 +1,8 @@
 {
 	"clouds" : [
 		{	
+			"name":"Local gateway MongoDB",	
 			"notice":"do not remove the MongoDB cloud declaration, just change enabled and max_months_to_store if needed",
-			"name":"Local gateway MongoDB",
 			"script":"python CloudMongoDB.py",
 			"type":"database",
 			"max_months_to_store":2,
@@ -12,44 +12,68 @@
 			"name":"SMS Service",
 			"script":"python CloudSMS.py",
 			"type":"smsservice",
-			"gammurc_file":"/home/pi/.gammurc",
 			"enabled":false,
 			"always_enabled":false
-		},	
+		},
+		{
+			"name":"Temporary storage for no Internet connection",
+			"script":"python CloudNoInternet.py",
+			"type":"file",            
+			"enabled":false
+        },			
 		{	
 			"name":"WAZIUP SMS Service ",
 			"script":"python CloudWAZIUP_SMS.py",
 			"type":"smsservice",
-			"gammurc_file":"/home/pi/.gammurc",
 			"enabled":false,
 			"always_enabled":false
-		},		
-		{	
-			"name":"WAZIUP Orion cloud",
+		},	
+		{
+			"name":"WAZIUP Orion cloud new API",
 			"script":"python CloudWAZIUP.py",
-			"type":"iotcloud",			
-			"write_key":"",
+			"type":"iotcloud",
 			"enabled":false
-		},			
+		},	        	        							
+		{	
+			"name":"WAZIUP Orion cloud old API",
+			"script":"python CloudOrion.py",
+			"type":"iotcloud",			
+			"enabled":false
+		},		
 		{	
 			"name":"ThingSpeak cloud",
 			"script":"python CloudThingSpeak.py",
 			"type":"iotcloud",			
-			"write_key":"",
 			"enabled":true
 		},
+		{	
+			"name":"NodeRed flow",
+			"script":"python CloudNodeRed.py",
+			"type":"nodered",			
+			"enabled":false
+		},
+		{	
+			"name":"MQTT cloud",
+			"script":"python CloudMQTT.py",
+			"type":"MQTT on test.mosquitto.org",			
+			"enabled":false
+		},
+		{	
+			"name":"GPS",
+			"script":"python CloudGpsFile.py",
+			"type":"file",			
+			"enabled":false
+		},									
 		{	
 			"name":"GroveStreams cloud",
 			"script":"python CloudGroveStreams.py",
 			"type":"iotcloud",			
-			"write_key":"",
 			"enabled":false
 		},
 		{	
 			"name":"Firebase cloud",
 			"script":"python CloudFireBase.py",
 			"type":"jsoncloud",			
-			"write_key":"",
 			"enabled":false
 		},		
 		{	
@@ -65,20 +89,42 @@
 		}				
 	],
 	"encrypted_clouds" : [
+		{	
+			"name":"NodeRed flow",
+			"script":"python CloudNodeRed.py",
+			"type":"nodered",			
+			"enabled":false
+		},
+		{	
+			"name":"MQTT cloud",
+			"script":"python CloudMQTT.py",
+			"type":"MQTT on test.mosquitto.org",			
+			"enabled":false
+		},		
 		{
 			"name":"Firebase cloud",
 			"script":"python CloudFireBaseAES.py",
 			"type":"iotcloud",			
-			"write_key":"",
 			"enabled":false			
 		}
 	],
 	"lorawan_encrypted_clouds" : [
+		{	
+			"name":"NodeRed flow",
+			"script":"python CloudNodeRed.py",
+			"type":"nodered",			
+			"enabled":false
+		},
+		{	
+			"name":"MQTT cloud",
+			"script":"python CloudMQTT.py",
+			"type":"MQTT on test.mosquitto.org",			
+			"enabled":false
+		},	
 		{
 			"name":"Firebase cloud",
 			"script":"python CloudFireBaseLWAES.py",
 			"type":"iotcloud",			
-			"write_key":"",
 			"enabled":false			
 		}
 	]	

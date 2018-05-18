@@ -63,12 +63,12 @@ def test_network_available():
 	# we try 4 times to connect to the server.
 	while(not connection and iteration < 4) :
 	    	try:
-	    		# 3sec timeout in case of server available but overcrowded
-			response=urllib2.urlopen('https://www.grovestreams.com/', timeout=3)
-			connection = True
+				# 3sec timeout in case of server available but overcrowded
+				response=urllib2.urlopen('https://www.grovestreams.com/', timeout=3)
+				connection = True
 	    	except urllib2.URLError, e: pass
-		except socket.timeout: pass
-		except ssl.SSLError: pass
+			except socket.timeout: pass
+			except ssl.SSLError: pass
 	    	
 	    	# if connection_failure == True and the connection with the server is unavailable, don't waste more time, exit directly
 	    	if(connection_failure and response is None) :
@@ -135,7 +135,7 @@ def grovestreams_uploadData(nomenclatures, data, src):
 	if(connected):
 		#len(nomenclatures) == len(data)
 		print("GroveStreams: uploading")
-		send_data(data, "node_"+src, nomenclatures)
+		send_data(data, src, nomenclatures)
 	else:
 		print("Grovestreams: not uploading")
 		
@@ -159,8 +159,18 @@ def main(ldata, pdata, rdata, tdata, gwid):
 	SNR=arr[5]
 	RSSI=arr[6]
 
-	if (str(src) in key_GroveStreams.source_list) or (len(key_GroveStreams.source_list)==0):
-		
+	#LoRaWAN packet
+	if dst==256:
+		src_str="%0.8X" % src
+	else:
+		src_str=str(src)	
+
+	if (src_str in key_GroveStreams.source_list) or (len(key_GroveStreams.source_list)==0):
+
+		#remove any space in the message as we use '/' as the delimiter
+		#any space characters may introduce error
+		ldata=ldata.replace(' ', '')
+				
 		# this part depends on the syntax used by the end-device
 		# we use: TC/22.4/HU/85...
 		#
@@ -229,7 +239,7 @@ def main(ldata, pdata, rdata, tdata, gwid):
 				i += 2
 	
 		#upload data to grovestreams
-		grovestreams_uploadData(nomenclatures, data, str(src))		
+		grovestreams_uploadData(nomenclatures, data, "node_"+src_str)		
 	else:
 		print "Source is not is source list, not sending with CloudGroveStreams.py"			
 

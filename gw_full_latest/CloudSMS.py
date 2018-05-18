@@ -27,12 +27,12 @@ import libSMS
 
 import key_SMS
 
+global sm, always_enabled, gammurc_file
+
 try:
 	key_SMS.source_list
 except AttributeError:
-	key_SMS.source_list=[]
-
-global sm, always_enabled, gammurc_file
+	key_SMS.source_list=[]	
 
 #------------------------------------------------------------
 # Open clouds.json file 
@@ -65,17 +65,29 @@ for cloud in clouds:
 		try:
 			gammurc_file = cloud["gammurc_file"]
 		except KeyError:
-			print "gammurc_file undefined"
+			gammurc_file="/home/pi/.gammurc"			
 
+if not always_enabled:
+	if (libSMS.internet_ON()):
+		print('Internet is available, no need to use the SMS Service')
+		sys.exit()
 
+try:
+	gammurc_file=key_SMS.gammurc_file
+except AttributeError:
+	gammurc_file="/home/pi/.gammurc"
+			
 #check Gammu configuration
 if (not libSMS.gammuCheck()):
+	print 'CloudSMS: Gammu is not available'
 	sys.exit()
 else: 
 	if (not libSMS.gammurcCheck(gammurc_file)):
+		print 'CloudSMS: gammurc file is not available'
 		sys.exit()
 
 if (libSMS.phoneConnection(gammurc_file, key_SMS.PIN) == None):
+	print 'CloudSMS: Can not connect to cellular network'
 	sys.exit()
 else:	
 	sm = libSMS.phoneConnection(gammurc_file, key_SMS.PIN)
@@ -101,9 +113,15 @@ def main(ldata, pdata, rdata, tdata, gwid):
 	bw=arr[0]
 	cr=arr[1]
 	sf=arr[2]
-	
-	if (str(src) in key_SMS.source_list) or (len(key_SMS.source_list)==0): 
-	
+
+	#LoRaWAN packet
+	if dst==256:
+		src_str="%0.8X" % src
+	else:
+		src_str=str(src)	
+
+	if (src_str in key_SMS.source_list) or (len(key_SMS.source_list)==0): 
+				
 		#this part depends on the syntax used by the end-device
 		#we use: thingspeak_channel#thingspeak_field#TC/22.4/HU/85... 
 		#ex: ##TC/22.4/HU/85... or TC/22.4/HU/85... or thingspeak_channel##TC/22.4/HU/85... 
@@ -147,10 +165,10 @@ def main(ldata, pdata, rdata, tdata, gwid):
 		data_array[len(data_array)-1] = data_array[len(data_array)-1].replace('\0', '')	
 	
 		#sms data to be sent
-		#sms_data = "SensorData Sensor"+str(src)
-	
-		#sms_data = "SRC#"+str(src)+"#RSSI#"+str(RSSI)+"#BW#"+str(bw)+"#CR#"+str(cr)+"#SF#"+str(sf)+"#GWID#"+gwid+"/"+data
-		sms_data = "SensorData Sensor"+str(src)+" RSSI "+str(RSSI)+" BW "+str(bw)+" CR "+str(cr)+" SF "+str(sf)+" GWID "+gwid
+		#here we append the device's address to get for instance Sensor2
+		#if packet come from a LoRaWAN device with 4-byte devAddr then we will have for instance Sensor01020304
+		#where the devAddr is expressed in hex format		
+		sms_data = "SensorData Sensor"+src_str+" SNR "+str(SNR)+" RSSI "+str(RSSI)+" SN "+str(seq)+" BW "+str(bw)+" CR "+str(cr)+" SF "+str(sf)+" GWID "+gwid
 		
 		nomenclatures = []
 		# data to send
@@ -179,16 +197,9 @@ def main(ldata, pdata, rdata, tdata, gwid):
 	
 		# Send data to expected contacts
 		success = False
-		if not always_enabled:
-			if (libSMS.internet_ON()):
-				print('Internet is available, no need to use the SMS Service')
-				sys.exit()
-			else:
-				print("rcv msg to send via the SMS Service: "+sms_data)
-				success = libSMS.send_sms(sm, sms_data, key_SMS.contacts)
-		else:
-			print("rcv msg to send via the SMS Service: "+sms_data)
-			success = libSMS.send_sms(sm, sms_data, key_SMS.contacts)
+
+		print("rcv msg to send via the SMS Service: "+sms_data)
+		success = libSMS.send_sms(sm, sms_data, key_SMS.contacts)
 		
 		if (success):
 			print "Sending SMS done"	

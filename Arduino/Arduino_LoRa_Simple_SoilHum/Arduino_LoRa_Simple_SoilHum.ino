@@ -42,9 +42,9 @@
 // IMPORTANT
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 // please uncomment only 1 choice
-//#define BAND868
+#define BAND868
 //#define BAND900
-#define BAND433
+//#define BAND433
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 #ifdef ETSI_EUROPE_REGULATION
@@ -81,9 +81,7 @@ const uint32_t DEFAULT_CHANNEL=CH_00_433;
 ///////////////////////////////////////////////////////////////////
 // COMMENT OR UNCOMMENT TO CHANGE FEATURES. 
 // ONLY IF YOU KNOW WHAT YOU ARE DOING!!! OTHERWISE LEAVE AS IT IS
-#if not defined _VARIANT_ARDUINO_DUE_X_ && not defined __SAMD21G18A__
 #define WITH_EEPROM
-#endif
 #define WITH_APPKEY
 #define LOW_POWER
 #define LOW_POWER_HIBERNATE
@@ -91,25 +89,38 @@ const uint32_t DEFAULT_CHANNEL=CH_00_433;
 ///////////////////////////////////////////////////////////////////
 
 ///////////////////////////////////////////////////////////////////
+// ADD HERE OTHER PLATFORMS THAT DO NOT SUPPORT EEPROM NOR LOW POWER
+#if defined ARDUINO_SAM_DUE || defined __SAMD21G18A__
+#undef WITH_EEPROM
+#endif
+
+#if defined ARDUINO_SAM_DUE
+#undef LOW_POWER
+#endif
+///////////////////////////////////////////////////////////////////
+
+///////////////////////////////////////////////////////////////////
 // CHANGE HERE THE LORA MODE, NODE ADDRESS 
 #define LORAMODE  1
-#define node_addr 6
+// you need to change the node address for each sensor in the same organization/farm
+// node address starts at 2 and ends at 255
+#define node_addr 2
 //////////////////////////////////////////////////////////////////
 
 ///////////////////////////////////////////////////////////////////
-// CHANGE HERE THE THINGSPEAK FIELD BETWEEN 1 AND 4
+// CHANGE HERE THE THINGSPEAK FIELD BETWEEN 1 AND 8
 #define field_index 1
 ///////////////////////////////////////////////////////////////////
 
 ///////////////////////////////////////////////////////////////////
 // CHANGE HERE THE TIME IN MINUTES BETWEEN 2 READING & TRANSMISSION
-unsigned int idlePeriodInMin = 30;
+unsigned int idlePeriodInMin = 60;
 ///////////////////////////////////////////////////////////////////
 
 // SENSORS DEFINITION 
 //////////////////////////////////////////////////////////////////
 // CHANGE HERE THE NUMBER OF SENSORS, SOME CAN BE NOT CONNECTED
-const int number_of_sensors = 3;
+const int number_of_sensors = 2;
 //////////////////////////////////////////////////////////////////
 
 #ifdef WITH_APPKEY
@@ -145,7 +156,7 @@ uint8_t my_appKey[4]={5, 6, 7, 8};
 #define NB_RETRIES 2
 #endif
 
-#if defined ARDUINO_AVR_PRO || defined ARDUINO_AVR_MINI || defined __MK20DX256__  || defined __MKL26Z64__ || defined __MK64FX512__ || defined __MK66FX1M0__ || defined __SAMD21G18A__
+#if defined ARDUINO_AVR_PRO || defined ARDUINO_AVR_MINI || defined ARDUINO_SAM_DUE || defined __MK20DX256__  || defined __MKL26Z64__ || defined __MK64FX512__ || defined __MK66FX1M0__ || defined __SAMD21G18A__
   // if you have a Pro Mini running at 5V, then change here
   // these boards work in 3.3V
   // Nexus board from Ideetron is a Mini
@@ -185,7 +196,6 @@ unsigned int nCycle = idlePeriodInMin*60/LOW_POWER_PERIOD;
 #endif
 
 unsigned long nextTransmissionTime=0L;
-char float_str[20];
 uint8_t message[100];
 int loraMode=LORAMODE;
 
@@ -222,11 +232,11 @@ void setup()
 // Sensor(nomenclature, is_analog, is_connected, is_low_power, pin_read, pin_power, pin_trigger=-1)
   sensor_ptrs[0] = new rawAnalog("SM1", IS_ANALOG, IS_CONNECTED, low_power_status, (uint8_t) A0, (uint8_t) 9);
   sensor_ptrs[1] = new rawAnalog("SM2", IS_ANALOG, IS_CONNECTED, low_power_status, (uint8_t) A1, (uint8_t) 8);
-  sensor_ptrs[2] = new rawAnalog("SM3", IS_ANALOG, IS_CONNECTED, low_power_status, (uint8_t) A2, (uint8_t) 7);
+  //sensor_ptrs[2] = new rawAnalog("SM3", IS_ANALOG, IS_CONNECTED, low_power_status, (uint8_t) A2, (uint8_t) 7);
 
   sensor_ptrs[0]->set_n_sample(10);
   sensor_ptrs[1]->set_n_sample(10);   
-  sensor_ptrs[2]->set_n_sample(10);
+  //sensor_ptrs[2]->set_n_sample(10);
   
   delay(3000);
   // Open serial communications and wait for port to open:
@@ -239,23 +249,59 @@ void setup()
   PRINT_CSTSTR("%s","Simple LoRa soil moisture sensor\n");
 
 #ifdef ARDUINO_AVR_PRO
-  PRINT_CSTSTR("%s","Arduino Pro Mini detected\n");
+  PRINT_CSTSTR("%s","Arduino Pro Mini detected\n");  
 #endif
-
 #ifdef ARDUINO_AVR_NANO
-  PRINT_CSTSTR("%s","Arduino Nano detected\n");
+  PRINT_CSTSTR("%s","Arduino Nano detected\n");   
 #endif
-
 #ifdef ARDUINO_AVR_MINI
-  PRINT_CSTSTR("%s","Arduino MINI/Nexus detected\n");
+  PRINT_CSTSTR("%s","Arduino MINI/Nexus detected\n");  
 #endif
-
+#ifdef ARDUINO_AVR_MEGA2560
+  PRINT_CSTSTR("%s","Arduino Mega2560 detected\n");  
+#endif
+#ifdef ARDUINO_SAM_DUE
+  PRINT_CSTSTR("%s","Arduino Due detected\n");  
+#endif
+#ifdef __MK66FX1M0__
+  PRINT_CSTSTR("%s","Teensy36 MK66FX1M0 detected\n");
+#endif
+#ifdef __MK64FX512__
+  PRINT_CSTSTR("%s","Teensy35 MK64FX512 detected\n");
+#endif
 #ifdef __MK20DX256__
-  PRINT_CSTSTR("%s","Teensy31/32 detected\n");
+  PRINT_CSTSTR("%s","Teensy31/32 MK20DX256 detected\n");
+#endif
+#ifdef __MKL26Z64__
+  PRINT_CSTSTR("%s","TeensyLC MKL26Z64 detected\n");
+#endif
+#if defined ARDUINO_SAMD_ZERO && not defined ARDUINO_SAMD_FEATHER_M0
+  PRINT_CSTSTR("%s","Arduino M0/Zero detected\n");
+#endif
+#ifdef ARDUINO_AVR_FEATHER32U4 
+  PRINT_CSTSTR("%s","Adafruit Feather32U4 detected\n"); 
+#endif
+#ifdef  ARDUINO_SAMD_FEATHER_M0
+  PRINT_CSTSTR("%s","Adafruit FeatherM0 detected\n");
 #endif
 
+// See http://www.nongnu.org/avr-libc/user-manual/using_tools.html
+// for the list of define from the AVR compiler
+
+#ifdef __AVR_ATmega328P__
+  PRINT_CSTSTR("%s","ATmega328P detected\n");
+#endif 
+#ifdef __AVR_ATmega32U4__
+  PRINT_CSTSTR("%s","ATmega32U4 detected\n");
+#endif 
+#ifdef __AVR_ATmega2560__
+  PRINT_CSTSTR("%s","ATmega2560 detected\n");
+#endif 
 #ifdef __SAMD21G18A__ 
-  PRINT_CSTSTR("%s","Arduino M0/Zero detected\n");
+  PRINT_CSTSTR("%s","SAMD21G18A ARM Cortex-M0+ detected\n");
+#endif
+#ifdef __SAM3X8E__ 
+  PRINT_CSTSTR("%s","SAM3X8E ARM Cortex-M3 detected\n");
 #endif
 
   // Power ON the module
@@ -471,7 +517,6 @@ void loop(void)
 
 #ifdef __SAMD21G18A__
       // For Arduino M0 or Zero we use the built-in RTC
-      //LowPower.standby();
       rtc.setTime(17, 0, 0);
       rtc.setDate(1, 1, 2000);
       rtc.setAlarmTime(17, idlePeriodInMin, 0);
@@ -480,6 +525,8 @@ void loop(void)
       rtc.enableAlarm(rtc.MATCH_HHMMSS);
       //rtc.attachInterrupt(alarmMatch);
       rtc.standbyMode();
+
+      LowPower.standby();      
 
       PRINT_CSTSTR("%s","SAMD21G18A wakes up from standby\n");      
       FLUSHOUTPUT
@@ -494,8 +541,8 @@ void loop(void)
 #endif          
       for (int i=0; i<nCycle; i++) {  
 
-#if defined ARDUINO_AVR_PRO || defined ARDUINO_AVR_NANO || ARDUINO_AVR_UNO || ARDUINO_AVR_MINI  
-          // ATmega328P, ATmega168
+#if defined ARDUINO_AVR_PRO || defined ARDUINO_AVR_NANO || defined ARDUINO_AVR_UNO || defined ARDUINO_AVR_MINI || defined __AVR_ATmega32U4__         
+          // ATmega328P, ATmega168, ATmega32U4
           LowPower.powerDown(SLEEP_8S, ADC_OFF, BOD_OFF);
           
           //LowPower.idle(SLEEP_8S, ADC_OFF, TIMER2_OFF, TIMER1_OFF, TIMER0_OFF, 
@@ -520,7 +567,7 @@ void loop(void)
           delay(LOW_POWER_PERIOD*1000);
 #endif                        
           PRINT_CSTSTR("%s",".");
-          FLUSHOUTPUT; 
+          FLUSHOUTPUT
           delay(10);                        
       }
       

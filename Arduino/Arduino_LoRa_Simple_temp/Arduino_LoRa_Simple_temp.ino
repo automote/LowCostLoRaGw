@@ -1,7 +1,7 @@
 /*
- *  temperature sensor on analog 8 to test the LoRa gateway
+ *  temperature sensor on analog A0 to test the LoRa gateway
  *
- *  Copyright (C) 2016 Congduc Pham, University of Pau, France
+ *  Copyright (C) 2016-2018 Congduc Pham, University of Pau, France
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -17,11 +17,13 @@
  *  along with the program.  If not, see <http://www.gnu.org/licenses/>.
  *
  *****************************************************************************
- * last update: Nov. 26th by C. Pham
+ * last update: Feb. 17th, 2018 by C. Pham
  */
 #include <SPI.h> 
 // Include the SX1272
 #include "SX1272.h"
+//uncomment if you want to disable WiFi on ESP8266 boards
+//#include <ESP8266WiFi.h>
 
 // IMPORTANT
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -60,7 +62,9 @@ const uint32_t DEFAULT_CHANNEL=CH_04_868;
 const uint32_t DEFAULT_CHANNEL=CH_10_868;
 #endif
 #elif defined BAND900
-const uint32_t DEFAULT_CHANNEL=CH_05_900;
+//const uint32_t DEFAULT_CHANNEL=CH_05_900;
+// For HongKong, Japan, Malaysia, Singapore, Thailand, Vietnam: 920.36MHz     
+const uint32_t DEFAULT_CHANNEL=CH_08_900;
 #elif defined BAND433
 const uint32_t DEFAULT_CHANNEL=CH_00_433;
 #endif
@@ -76,33 +80,48 @@ const uint32_t DEFAULT_CHANNEL=CH_00_433;
 ///////////////////////////////////////////////////////////////////
 // COMMENT OR UNCOMMENT TO CHANGE FEATURES. 
 // ONLY IF YOU KNOW WHAT YOU ARE DOING!!! OTHERWISE LEAVE AS IT IS
-#if not defined _VARIANT_ARDUINO_DUE_X_ && not defined __SAMD21G18A__
-#define WITH_EEPROM
-#endif
+//#define WITH_EEPROM
 #define WITH_APPKEY
-#define FLOAT_TEMP
-//#define NEW_DATA_FIELD
+//if you are low on program memory, comment STRING_LIB to save about 2K
+#define STRING_LIB
 #define LOW_POWER
 #define LOW_POWER_HIBERNATE
 //#define WITH_ACK
+//#define LOW_POWER_TEST
+///////////////////////////////////////////////////////////////////
+
+///////////////////////////////////////////////////////////////////
+// ADD HERE OTHER PLATFORMS THAT DO NOT SUPPORT EEPROM NOR LOW POWER
+#if defined ARDUINO_SAM_DUE || defined __SAMD21G18A__
+#undef WITH_EEPROM
+#endif
+
+#if defined ARDUINO_SAM_DUE
+#undef LOW_POWER
+#endif
 ///////////////////////////////////////////////////////////////////
 
 ///////////////////////////////////////////////////////////////////
 // CHANGE HERE THE LORA MODE, NODE ADDRESS 
 #define LORAMODE  1
-#define node_addr 10
+#define node_addr 6
 //////////////////////////////////////////////////////////////////
 
 ///////////////////////////////////////////////////////////////////
-// CHANGE HERE THE THINGSPEAK FIELD BETWEEN 1 AND 4
-#define field_index 1
+// CHANGE HERE THE THINGSPEAK FIELD BETWEEN 1 AND 8
+#define field_index 3
 ///////////////////////////////////////////////////////////////////
 
 ///////////////////////////////////////////////////////////////////
 // CHANGE HERE THE READ PIN AND THE POWER PIN FOR THE TEMP. SENSOR
 #define TEMP_PIN_READ  A0
-// use digital 8 to power the temperature sensor if needed
-#define TEMP_PIN_POWER 8
+// use digital 9 to power the temperature sensor if needed
+// but on most ESP8266 boards pin 9 can not be used, so use pin 2 instead
+#ifdef ARDUINO_ESP8266_ESP01
+#define TEMP_PIN_POWER 2
+#else
+#define TEMP_PIN_POWER 9
+#endif
 ///////////////////////////////////////////////////////////////////
 
 ///////////////////////////////////////////////////////////////////
@@ -117,6 +136,11 @@ unsigned int idlePeriodInMin = 10;
 uint8_t my_appKey[4]={5, 6, 7, 8};
 ///////////////////////////////////////////////////////////////////
 #endif
+
+///////////////////////////////////////////////////////////////////
+// IF YOU SEND A LONG STRING, INCREASE THE SIZE OF MESSAGE
+uint8_t message[50];
+///////////////////////////////////////////////////////////////////
 
 // we wrapped Serial.println to support the Arduino Zero or M0
 #if defined __SAMD21G18A__ && not defined ARDUINO_SAMD_FEATHER_M0
@@ -143,7 +167,7 @@ uint8_t my_appKey[4]={5, 6, 7, 8};
 #define NB_RETRIES 2
 #endif
 
-#if defined ARDUINO_AVR_PRO || defined ARDUINO_AVR_MINI || defined __MK20DX256__  || defined __MKL26Z64__ || defined __MK64FX512__ || defined __MK66FX1M0__ || defined __SAMD21G18A__
+#if defined ARDUINO_AVR_PRO || defined ARDUINO_AVR_MINI || defined ARDUINO_SAM_DUE || defined __MK20DX256__  || defined __MKL26Z64__ || defined __MK64FX512__ || defined __MK66FX1M0__ || defined __SAMD21G18A__
   // if you have a Pro Mini running at 5V, then change here
   // these boards work in 3.3V
   // Nexus board from Ideetron is a Mini
@@ -166,7 +190,10 @@ uint8_t my_appKey[4]={5, 6, 7, 8};
 #include <Snooze.h>
 SnoozeTimer timer;
 SnoozeBlock sleep_config(timer);
-#else
+#elif defined ARDUINO_ESP8266_ESP01
+#define LOW_POWER_PERIOD 60
+//we will use the deepSleep feature, so no additional library
+#else // for all other boards based on ATMega168, ATMega328P, ATMega32U4, ATMega2560, ATMega256RFR2, ATSAMD21G18A
 #define LOW_POWER_PERIOD 8
 // you need the LowPower library from RocketScream
 // https://github.com/rocketscream/Low-Power
@@ -182,10 +209,7 @@ RTCZero rtc;
 unsigned int nCycle = idlePeriodInMin*60/LOW_POWER_PERIOD;
 #endif
 
-double temp;
 unsigned long nextTransmissionTime=0L;
-char float_str[20];
-uint8_t message[100];
 int loraMode=LORAMODE;
 
 #ifdef WITH_EEPROM
@@ -204,6 +228,13 @@ void setup()
 {
   int e;
 
+  //uncomment to disable WiFi on the ESP8266 boards
+  //will save about 50mA
+  //WiFi.disconnect();
+  //WiFi.mode(WIFI_OFF);
+  //WiFi.forceSleepBegin();
+  //delay(1);
+  
   // for the temperature sensor
   pinMode(TEMP_PIN_READ, INPUT);
   // and to power the temperature sensor
@@ -228,29 +259,75 @@ void setup()
   PRINT_CSTSTR("%s","Simple LoRa temperature sensor\n");
 
 #ifdef ARDUINO_AVR_PRO
-  PRINT_CSTSTR("%s","Arduino Pro Mini detected\n");
+  PRINT_CSTSTR("%s","Arduino Pro Mini detected\n");  
 #endif
-
 #ifdef ARDUINO_AVR_NANO
-  PRINT_CSTSTR("%s","Arduino Nano detected\n");
+  PRINT_CSTSTR("%s","Arduino Nano detected\n");   
 #endif
-
 #ifdef ARDUINO_AVR_MINI
-  PRINT_CSTSTR("%s","Arduino MINI/Nexus detected\n");
+  PRINT_CSTSTR("%s","Arduino Mini/Nexus detected\n");  
 #endif
-
+#ifdef ARDUINO_AVR_MEGA2560
+  PRINT_CSTSTR("%s","Arduino Mega2560 detected\n");  
+#endif
+#ifdef ARDUINO_SAM_DUE
+  PRINT_CSTSTR("%s","Arduino Due detected\n");  
+#endif
+#ifdef __MK66FX1M0__
+  PRINT_CSTSTR("%s","Teensy36 MK66FX1M0 detected\n");
+#endif
+#ifdef __MK64FX512__
+  PRINT_CSTSTR("%s","Teensy35 MK64FX512 detected\n");
+#endif
 #ifdef __MK20DX256__
-  PRINT_CSTSTR("%s","Teensy31/32 detected\n");
+  PRINT_CSTSTR("%s","Teensy31/32 MK20DX256 detected\n");
+#endif
+#ifdef __MKL26Z64__
+  PRINT_CSTSTR("%s","TeensyLC MKL26Z64 detected\n");
+#endif
+#if defined ARDUINO_SAMD_ZERO && not defined ARDUINO_SAMD_FEATHER_M0
+  PRINT_CSTSTR("%s","Arduino M0/Zero detected\n");
+#endif
+#ifdef ARDUINO_AVR_FEATHER32U4 
+  PRINT_CSTSTR("%s","Adafruit Feather32U4 detected\n"); 
+#endif
+#ifdef ARDUINO_SAMD_FEATHER_M0
+  PRINT_CSTSTR("%s","Adafruit FeatherM0 detected\n");
+#endif
+#ifdef ARDUINO_ESP8266_ESP01
+  PRINT_CSTSTR("%s","Expressif ESP8266 detected\n");
+  //uncomment if you want to disable the WiFi, this will reset your board
+  //but maybe it is preferable to use the WiFi.mode(WIFI_OFF), see above
+  //ESP.deepSleep(1, WAKE_RF_DISABLED);  
 #endif
 
+// See http://www.nongnu.org/avr-libc/user-manual/using_tools.html
+// for the list of define from the AVR compiler
+
+#ifdef __AVR_ATmega328P__
+  PRINT_CSTSTR("%s","ATmega328P detected\n");
+#endif 
+#ifdef __AVR_ATmega32U4__
+  PRINT_CSTSTR("%s","ATmega32U4 detected\n");
+#endif 
+#ifdef __AVR_ATmega2560__
+  PRINT_CSTSTR("%s","ATmega2560 detected\n");
+#endif 
 #ifdef __SAMD21G18A__ 
-  PRINT_CSTSTR("%s","Arduino M0/Zero detected\n");
+  PRINT_CSTSTR("%s","SAMD21G18A ARM Cortex-M0+ detected\n");
+#endif
+#ifdef __SAM3X8E__ 
+  PRINT_CSTSTR("%s","SAM3X8E ARM Cortex-M3 detected\n");
 #endif
 
   // Power ON the module
   sx1272.ON();
 
 #ifdef WITH_EEPROM
+
+#ifdef ARDUINO_ESP8266_ESP01
+  EEPROM.begin(512);
+#endif
   // get config from EEPROM
   EEPROM.get(0, my_sx1272config);
 
@@ -315,14 +392,20 @@ void setup()
   PRINT_CSTSTR("%s","Setting node addr: state ");
   PRINT_VALUE("%d", e);
   PRINTLN;
-  
+
+  // Set CRC off
+  //e = sx1272.setCRC_OFF();
+  //PRINT_CSTSTR("%s","Setting CRC off: state ");
+  //PRINT_VALUE("%d", e);
+  //PRINTLN;
+    
   // Print a success message
   PRINT_CSTSTR("%s","SX1272 successfully configured\n");
 
   delay(500);
 }
 
-#if not defined _VARIANT_ARDUINO_DUE_X_ && defined FLOAT_TEMP
+#ifndef STRING_LIB
 
 char *ftoa(char *a, double f, int precision)
 {
@@ -334,9 +417,13 @@ char *ftoa(char *a, double f, int precision)
  while (*a != '\0') a++;
  *a++ = '.';
  long desimal = abs((long)((f - heiltal) * p[precision]));
+ if (desimal < p[precision-1]) {
+  *a++ = '0';
+ } 
  itoa(desimal, a, 10);
  return ret;
 }
+
 #endif
 
 void loop(void)
@@ -345,6 +432,7 @@ void loop(void)
   long endSend;
   uint8_t app_key_offset=0;
   int e;
+  float temp;
 
 #ifndef LOW_POWER
   // 600000+random(15,60)*1000
@@ -354,25 +442,41 @@ void loop(void)
 #ifdef LOW_POWER
       digitalWrite(TEMP_PIN_POWER,HIGH);
       // security?
-      delay(200);    
-      int value = analogRead(TEMP_PIN_READ);
-      digitalWrite(TEMP_PIN_POWER,LOW);
-#else
-      int value = analogRead(TEMP_PIN_READ);
+      delay(200);   
 #endif
-      
-      // change here how the temperature should be computed depending on your sensor type
-      //  
-      temp = value*TEMP_SCALE/1024.0;
-    
-      PRINT_CSTSTR("%s","Reading ");
-      PRINT_VALUE("%d", value);
-      PRINTLN;
-      
-      //temp = temp - 0.5;
-      temp = temp / 10.0;
 
-      PRINT_CSTSTR("%s","Temp is ");
+      temp = 0.0;
+      int value;
+      
+      for (int i=0; i<5; i++) {
+          // change here how the temperature should be computed depending on your sensor type
+          // 
+          value = analogRead(TEMP_PIN_READ);
+
+          //LM35DZ
+          //the LM35DZ needs at least 4v as supply voltage
+          //can be used on 5v board
+          temp += (value*TEMP_SCALE/1024.0)/10;
+
+          //TMP36
+          //the TMP36 can work with supply voltage of 2.7v-5.5v
+          //can be used on 3.3v board
+          //we use a 0.95 factor when powering with less than 3.3v, e.g. 3.1v in the average for instance
+          //this setting is for 2 AA batteries
+          //temp += ((value*0.95*TEMP_SCALE/1024.0)-500)/10;
+        
+          PRINT_CSTSTR("%s","Reading ");
+          PRINT_VALUE("%d", value);
+          PRINTLN;   
+          delay(100);
+      }
+      
+#ifdef LOW_POWER
+      digitalWrite(TEMP_PIN_POWER,LOW);
+#endif
+
+      PRINT_CSTSTR("%s","Mean temp is ");
+      temp = temp/5;
       PRINT_VALUE("%f", temp);
       PRINTLN;
       
@@ -383,37 +487,16 @@ void loop(void)
 #endif
 
       uint8_t r_size;
-
-      // then use app_key_offset to skip the app key
-#ifdef _VARIANT_ARDUINO_DUE_X_
-#ifdef NEW_DATA_FIELD
-      r_size=sprintf((char*)message+app_key_offset, "\\!#%d#TC/%.2f", field_index, temp);
+      
+      // the recommended format if now \!TC/22.5
+#ifdef STRING_LIB
+      r_size=sprintf((char*)message+app_key_offset,"\\!#%d#TC/%s",field_index,String(temp).c_str());
 #else
-      r_size=sprintf((char*)message+app_key_offset, "\\!#%d#%.2f", field_index, temp);
-#endif      
-#else
-    
-#ifdef FLOAT_TEMP
+      char float_str[10];
       ftoa(float_str,temp,2);
-
-#ifdef NEW_DATA_FIELD
       // this is for testing, uncomment if you just want to test, without a real temp sensor plugged
       //strcpy(float_str, "21.55567");
       r_size=sprintf((char*)message+app_key_offset,"\\!#%d#TC/%s",field_index,float_str);
-#else
-      // this is for testing, uncomment if you just want to test, without a real temp sensor plugged
-      //strcpy(float_str, "21.55567");
-      r_size=sprintf((char*)message+app_key_offset,"\\!#%d#%s",field_index,float_str);
-#endif
-      
-#else
-      
-#ifdef NEW_DATA_FIELD      
-      r_size=sprintf((char*)message+app_key_offset, "\\!#%d#TC/%d", field_index, (int)temp);   
-#else
-      r_size=sprintf((char*)message+app_key_offset, "\\!#%d#%d", field_index, (int)temp);
-#endif         
-#endif
 #endif
 
       PRINT_CSTSTR("%s","Sending ");
@@ -464,8 +547,11 @@ void loop(void)
     
 #ifdef WITH_EEPROM
       // save packet number for next packet in case of reboot
-      my_sx1272config.seq=sx1272._packetNumber;
+      my_sx1272config.seq=sx1272._packetNumber;     
       EEPROM.put(0, my_sx1272config);
+#ifdef ARDUINO_ESP8266_ESP01
+      EEPROM.commit();
+#endif
 #endif
 
       PRINT_CSTSTR("%s","LoRa pkt size ");
@@ -492,7 +578,7 @@ void loop(void)
       PRINT_VALUE("%d", sx1272.getRemainingToA());
       PRINTLN;
         
-#ifdef LOW_POWER
+#if defined LOW_POWER && not defined ARDUINO_SAM_DUE
       PRINT_CSTSTR("%s","Switch to power saving mode\n");
 
       e = sx1272.setSleepMode();
@@ -503,11 +589,15 @@ void loop(void)
         PRINT_CSTSTR("%s","Could not switch LoRa module in sleep mode\n");
         
       FLUSHOUTPUT
+      
+#ifdef LOW_POWER_TEST
+      delay(10000);
+#else            
       delay(50);
+#endif
 
 #ifdef __SAMD21G18A__
       // For Arduino M0 or Zero we use the built-in RTC
-      //LowPower.standby();
       rtc.setTime(17, 0, 0);
       rtc.setDate(1, 1, 2000);
       rtc.setAlarmTime(17, idlePeriodInMin, 0);
@@ -516,11 +606,13 @@ void loop(void)
       rtc.enableAlarm(rtc.MATCH_HHMMSS);
       //rtc.attachInterrupt(alarmMatch);
       rtc.standbyMode();
-
+      
+      LowPower.standby();
+      
       PRINT_CSTSTR("%s","SAMD21G18A wakes up from standby\n");      
       FLUSHOUTPUT
 #else
-      nCycle = idlePeriodInMin*60/LOW_POWER_PERIOD + random(2,4);
+      nCycle = idlePeriodInMin*60/LOW_POWER_PERIOD; //+ random(2,4);
 
 #if defined __MK20DX256__ || defined __MKL26Z64__ || defined __MK64FX512__ || defined __MK66FX1M0__
       // warning, setTimer accepts value from 1ms to 65535ms max
@@ -530,8 +622,8 @@ void loop(void)
 #endif          
       for (int i=0; i<nCycle; i++) {  
 
-#if defined ARDUINO_AVR_PRO || defined ARDUINO_AVR_NANO || ARDUINO_AVR_UNO || ARDUINO_AVR_MINI  
-          // ATmega328P, ATmega168
+#if defined ARDUINO_AVR_PRO || defined ARDUINO_AVR_NANO || defined ARDUINO_AVR_UNO || defined ARDUINO_AVR_MINI || defined __AVR_ATmega32U4__ 
+          // ATmega328P, ATmega168, ATmega32U4
           LowPower.powerDown(SLEEP_8S, ADC_OFF, BOD_OFF);
           
           //LowPower.idle(SLEEP_8S, ADC_OFF, TIMER2_OFF, TIMER1_OFF, TIMER0_OFF, 
@@ -550,13 +642,17 @@ void loop(void)
 #else            
           Snooze.deepSleep(sleep_config);
 #endif
-
+#elif defined ARDUINO_ESP8266_ESP01
+          //in microseconds
+          //it is reported that RST pin should be connected to pin 16 to actually reset the board when deepsleep
+          //timer is triggered
+          ESP.deepSleep(LOW_POWER_PERIOD*1000*1000);
 #else
           // use the delay function
           delay(LOW_POWER_PERIOD*1000);
 #endif                        
           PRINT_CSTSTR("%s",".");
-          FLUSHOUTPUT; 
+          FLUSHOUTPUT
           delay(10);                        
       }
       
@@ -573,6 +669,4 @@ void loop(void)
       PRINTLN;
   }
 #endif
-
-  delay(50);
 }
