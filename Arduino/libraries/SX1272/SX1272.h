@@ -21,6 +21,11 @@
  *  Design:            David Gascón 
  *  Implementation:    Covadonga Albiñana & Victor Boria
  */
+ 
+/*
+ * Many changes have been performed to v1.1 released by Libelium
+ * C. Pham, see change logs in SX1272.cpp
+ */
 
 #ifndef SX1272_h
 #define SX1272_h
@@ -48,6 +53,7 @@
 //#define W_NET_KEY
 //#define W_INITIALIZATION
 
+
 // Optimising for MEGA
 #define SX1272_RST  22
 #define SX1272_SS   53
@@ -56,12 +62,19 @@
 || defined __MK20DX256__ || defined __MKL26Z64__
 #define SX1272_SS 10
 #elif defined ARDUINO_AVR_FEATHER32U4 || defined ARDUINO_SAMD_FEATHER_M0
+//it is not mandatory to wire this pin
+//we take pin 4 as it is available on many boards
+#define SX1272_RST  4
+
+#if defined ARDUINO_AVR_FEATHER32U4 || defined ARDUINO_SAMD_FEATHER_M0
 // on the Adafruit Feather, the RFM95W is embeded and CS pin is normally on pin 8
 #define SX1272_SS 8
-#undef SX1272_RST
-#define SX1272_RST  4
+#elif defined ARDUINO_ESP8266_ESP01
+#define SX1272_SS 15
 #else
-#define SX1272_SS 2
+// starting from November 3rd, 2017, the CS pin is always pin number 10 on Arduino boards
+// if you use the Libelium Multiprotocol shield to connect a Libelium LoRa then change the CS pin to pin 2
+#define SX1272_SS 5
 #endif
 */
 #define SX1272Chip  0
@@ -363,6 +376,7 @@ const uint16_t MAX_WAIT = 12000;		//12000 msec = 12.0 sec
 const uint8_t MAX_RETRIES = 5;
 const uint8_t CORRECT_PACKET = 0;
 const uint8_t INCORRECT_PACKET = 1;
+const uint8_t INCORRECT_PACKET_TYPE = 2;
 
 // added by C. Pham
 // Packet type definition
@@ -376,7 +390,7 @@ const uint8_t INCORRECT_PACKET = 1;
 #define PKT_FLAG_ACK_REQ            0x08
 #define PKT_FLAG_DATA_ENCRYPTED     0x04
 #define PKT_FLAG_DATA_WAPPKEY       0x02
-#define PKT_FLAG_DATA_ISBINARY      0x01
+#define PKT_FLAG_DATA_DOWNLINK      0x01
 
 #define SX1272_ERROR_ACK        3
 #define SX1272_ERROR_TOA        4
@@ -418,10 +432,12 @@ struct pack
  	*/
 	uint8_t length;
 
+    // modified by C. Pham
+    // use a pointer instead of static variable to same memory footprint
 	//! Structure Variable : Packet payload
 	/*!
  	*/
-	uint8_t data[MAX_PAYLOAD];
+    uint8_t* data;
 
     // modified by C. Pham
     // will not be used in the transmitted packet
@@ -1172,7 +1188,10 @@ public:
     void RxChainCalibration();
     uint8_t doCAD(uint8_t counter);
     uint16_t getToA(uint8_t pl);
-    void CarrierSense();
+    void CarrierSense(uint8_t cs=1);
+    void CarrierSense1();
+    void CarrierSense2();
+    void CarrierSense3(); 
     int8_t setSyncWord(uint8_t sw);
     int8_t getSyncWord();
     int8_t setSleepMode();
@@ -1180,11 +1199,14 @@ public:
     long limitToA();
     long getRemainingToA();
     long removeToA(uint16_t toa);
+    int8_t setFreqHopOn();
+    void setCSPin(uint8_t cs);
 
     // SX1272 or SX1276?
     uint8_t _board;
     uint8_t _syncWord;
     uint8_t _defaultSyncWord;
+    uint8_t _SX1272_SS;
     unsigned long _starttime;
     unsigned long _stoptime;
     unsigned long _startDoCad;
@@ -1194,6 +1216,8 @@ public:
     bool _extendedIFS;
     bool _RSSIonSend;
     bool _enableCarrierSense;
+    bool _freqHopOn;
+    uint8_t _hopPeriod;
     bool _rawFormat;
     int8_t _rcv_snr_in_ack;
     bool _needPABOOST;
@@ -1385,6 +1409,12 @@ public:
   	/*!
    	*/
 	pack ACK;
+
+    //! Structure Variable : Packet payload
+    /*!
+    */
+    uint8_t packet_data[MAX_PAYLOAD];
+    uint8_t ack_data[2];
 
 	//! Variable : temperature module.
 	//!
