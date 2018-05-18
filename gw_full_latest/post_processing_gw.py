@@ -18,8 +18,7 @@
 # You should have received a copy of the GNU General Public License
 # along with the program.  If not, see <http://www.gnu.org/licenses/>.
 #
-# v3.8 - image modification and need to incorporate aux_radio features
-# + copy post-processing feature
+# v3.1 - need to incorporate aux_radio features
 #------------------------------------------------------------
 
 # IMPORTANT NOTE
@@ -31,8 +30,6 @@
 # END
 #////////////////////////////////////////////////////////////
 
-dateutil_tz=True
-
 import sys
 import subprocess
 import select
@@ -41,11 +38,6 @@ from threading import Timer
 import time
 from collections import deque
 import datetime
-try:
-	import dateutil.tz
-except ImportError:
-	print "no timezone support, time will be expressed only in local time"
-	dateutil_tz=False
 import getopt
 import os
 import os.path
@@ -63,24 +55,23 @@ import libSMS
 
 
 #////////////////////////////////////////////////////////////
+# ADD HERE APP KEYS THAT YOU WANT TO ALLOW FOR YOUR GATEWAY
+#////////////////////////////////////////////////////////////
+# NOTE: the format of the application key list has changed from 
+# a list of list, to a list of string that will be process as 
+# a byte array. Doing so wilL allow for dictionary construction
+# using the appkey to retrieve information such as encryption key,...
+
+app_key_list = [
+	#change/add here your application keys
+	'\x01\x02\x03\x04',
+	'\x05\x06\x07\x08' 
+]
+
+#////////////////////////////////////////////////////////////
 
 #------------------------------------------------------------
-#low-level data prefix
-#------------------------------------------------------------
-
-LL_PREFIX_1='\xFF'
-LL_PREFIX_LORA='\xFE'
-#add here other data prefix for other type of low-level radio gateway
-
-
-#list here other radio type
-LORA_RADIO=1
-
-#will be dynamically determined according to the second data prefix
-radio_type=LORA_RADIO
-
-#------------------------------------------------------------
-#LoRa header packet information
+#header packet information
 #------------------------------------------------------------
 
 HEADER_SIZE=4
@@ -91,9 +82,7 @@ PKT_TYPE_ACK=0x20
 PKT_FLAG_ACK_REQ=0x08
 PKT_FLAG_DATA_ENCRYPTED=0x04
 PKT_FLAG_DATA_WAPPKEY=0x02
-PKT_FLAG_DATA_DOWNLINK=0x01
-
-LORAWAN_HEADER_SIZE=13
+PKT_FLAG_DATA_ISBINARY=0x01
 
 #------------------------------------------------------------
 #last pkt information
@@ -194,14 +183,8 @@ except KeyError:
 	_wappkey = 0	
 	
 if _wappkey:
-	print "will enforce app key"
-	print "importing list of app key"
-	try:
-		import key_AppKey
-	except ImportError:
-		print "no key_AppKey.py file"
-		_wappkey = 0
-		
+	print "will enforce app key"		
+
 #------------------------------------------------------------
 #initialize gateway DHT22 sensor
 #------------------------------------------------------------
@@ -209,16 +192,13 @@ try:
 	_gw_dht22 = json_array["gateway_conf"]["dht22"]
 except KeyError:
 	_gw_dht22 = 0
-
-if _gw_dht22 < 0:
-	_gw_dht22 = 0
-		
+	
 _date_save_dht22 = None
 
 try:
 	_dht22_mongo = json_array["gateway_conf"]["dht22_mongo"]
 except KeyError:
-	_dht22_mongo = False
+	_dht22_mongo = 0
 
 if (_dht22_mongo):
 	global add_document	
@@ -271,42 +251,6 @@ def dht22_target():
 		global _gw_dht22
 		time.sleep(_gw_dht22)
 
-
-#------------------------------------------------------------
-#copy post-processing.log into /var/www/html/admin/log folder
-#------------------------------------------------------------
-
-#you can enable periodic copy of post-processing.log file by setting to True
-#but you need to install the web admin interface in order to have the /var/www/html/admin/log/ folder
-#note that this feature is obsoleted by an option in the web admin interface to copy post-processing.log file on demand
-_gw_copy_post_processing=False
-
-#TODO: integrate copy post_processing feature into periodic status/tasks?
-def copy_post_processing():
-	print "extract last 500 lines of post-processing.log into /var/www/html/admin/log/post-processing-500L.log"
-	cmd="sudo tail -n 500 log/post-processing.log > /var/www/html/admin/log/post-processing-500L.log"
-	
-	try:
-		os.system(cmd)
-	except:
-		print "Error when extracting lines from post-processing_"+_gwid+".log"
-		
-	cmd="sudo chown -R pi:www-data /var/www/html/admin/log"
-	
-	try:
-		os.system(cmd)
-	except:
-		print "Error when setting file ownership to pi:www-data"
-	
-
-def copy_post_processing_target():
-	while True:
-		copy_post_processing()
-		sys.stdout.flush()
-		#change here if you want to change the time between 2 extraction
-		#here it is 30mins	
-		time.sleep(1800)
-	
 #------------------------------------------------------------
 #for downlink features
 #------------------------------------------------------------
@@ -316,24 +260,11 @@ try:
 except KeyError:
 	_gw_downlink = 0
 
-if _gw_downlink < 0:
-	_gw_downlink = 0
-	
 _post_downlink_file = "downlink/downlink-post.txt"
 _post_downlink_queued_file = "downlink/downlink-post-queued.txt"
 _gw_downlink_file = "downlink/downlink.txt"
 
 pending_downlink_requests = []
-
-#actually, periodic output for downlink may be not very convenient
-#as typical value for checking downlink is 1 to 5 minutes
-#so we disable it here
-_verbose_downlink=False
-
-#if we check every hour, then switch output on
-#you can also disable this behavior
-if _gw_downlink > 3600:
-	_verbose_downlink=True
 
 def check_downlink():
 
@@ -342,11 +273,9 @@ def check_downlink():
 	# - valid requests will be appended to downlink/downlink-post_queued.txt
 	# - after reading downlink/downlink_post.txt, post_processing_gw.py deletes it
 	# - when a packet from device i is processed by post_processing_gw.py, it will check whether there is a queued message for i
-	# - if yes, then it generates a downlink/downlink.txt file with the queue message as content
-	
-	if _verbose_downlink:	
-		print datetime.datetime.now()
-		print "post downlink: checking for "+_post_downlink_file
+	# - if yes, then it generates a downlink/downlink.txt file with the queue message as content	
+	print datetime.datetime.now()
+	print "post downlink: checking for "+_post_downlink_file
 	
 	if os.path.isfile(os.path.expanduser(_post_downlink_file)):
 
@@ -380,17 +309,15 @@ def check_downlink():
 		os.remove(os.path.expanduser(_post_downlink_file))	
 		
 	else:
-		if _verbose_downlink:
-			print "post downlink: no downlink requests"
+		print "post downlink: no downlink requests"
 
-	if _verbose_downlink:
-		print "post downlink: list of pending downlink requests"
+	print "post downlink: list of pending downlink requests"
 	
-		if len(pending_downlink_requests) == 0:
-			print "None"
-		else:	
-			for downlink_request in pending_downlink_requests:
-				print downlink_request.replace('\n','')		
+	if len(pending_downlink_requests) == 0:
+		print "None"
+	else:	
+		for downlink_request in pending_downlink_requests:
+			print downlink_request.replace('\n','')		
 	
 def downlink_target():
 	while True:
@@ -400,7 +327,7 @@ def downlink_target():
 		time.sleep(_gw_downlink)
 		
 #------------------------------------------------------------
-#for doing periodic status/tasks
+#for sending periodic status
 #------------------------------------------------------------
 
 try:
@@ -408,31 +335,21 @@ try:
 except KeyError:
 	_gw_status = 0		
 
-if _gw_status < 0:
-	_gw_status = 0 
-
-# if _gw_status:
-# 	try:
-# 		_gw_lat = json_array["gateway_conf"]["ref_latitude"]
-# 	except KeyError:
-# 		_gw_lat = "undef"
-# 	try:
-# 		_gw_long = json_array["gateway_conf"]["ref_longitude"]
-# 	except KeyError:
-# 		_gw_long = "undef"		
+if _gw_status:
+	try:
+		_gw_lat = json_array["gateway_conf"]["ref_latitude"]
+	except KeyError:
+		_gw_lat = "undef"
+	try:
+		_gw_long = json_array["gateway_conf"]["ref_longitude"]
+	except KeyError:
+		_gw_long = "undef"		
 					
 def status_target():
 	while True:
 		print datetime.datetime.now()
-		print 'post status: gw ON'
-		if _gw_downlink:
-			print 'post status: will check for downlink requests every %d seconds' % _gw_downlink
-		print 'post status: executing periodic tasks'
-		sys.stdout.flush()		
-		try:
-			os.system('python post_status_processing_gw.py')
-		except:
-			print "Error when executing post_status_processing_gw.py"			
+		print 'post status: gw ON, lat '+_gw_lat+' long '+_gw_long
+		sys.stdout.flush()
 		global _gw_status
 		time.sleep(_gw_status)
 
@@ -501,12 +418,8 @@ def send_alert_mail(m):
 if _use_mail_alert :
 	print "post_processing_gw.py sends mail indicating that gateway has started post-processing stage..."
 	if checkNet():
-		try:
-			send_alert_mail("Gateway "+_gwid+" has started post-processing stage")
-			print "Sending mail done"
-		except:
-			print "Unexpected error when sending mail"
-				
+		send_alert_mail("Gateway "+_gwid+" has started post-processing stage")
+		print "Sending mail done"
 	sys.stdout.flush()		
 	
 #------------------------------------------------------------
@@ -581,14 +494,12 @@ def image_timeout():
 	f.close()
 	del fileH[node_id]
 	print "decoding image "+os.path.expanduser(imageFilenameA[node_id])
-	sys.stdout.flush()
 	
 	cmd = '/home/pi/lora_gateway/ucam-images/decode_to_bmp -received '+os.path.expanduser(imageFilenameA[node_id])+\
 		' -SN '+str(imgsnA[node_id])+\
 		' -src '+str(node_id)+\
 		' -camid '+str(camidA[node_id])+\
 		' -Q '+str(qualityA[node_id])+\
-		' -vflip'+\
 		' /home/pi/lora_gateway/ucam-images/128x128-test.bmp'
 	
 	print "decoding with command"
@@ -596,32 +507,21 @@ def image_timeout():
 	args = cmd.split()
 
 	out = 'error'
-		
+	
 	try:
 		out = subprocess.check_output(args, stderr=None, shell=False)
 		
 		if (out=='error'):
 			print "decoding error"
 		else:
-        	# leave enough time for the decoding program to terminate
-			time.sleep(3)
-			out = out.replace('\r','')
-			out = out.replace('\n','')
-			print "producing file " + out
-			print "creating if needed the uploads/node_"+str(node_id)+" folder"
-			try:
-				os.mkdir(os.path.expanduser(_web_folder_path+"images/uploads/node_"+str(node_id)))
-			except OSError:
-				print "folder already exist"				 	 
-			print "moving decoded image file into " + os.path.expanduser(_web_folder_path+"images/uploads/node_"+str(node_id))
-			os.rename(os.path.expanduser("./"+out), os.path.expanduser(_web_folder_path+"images/uploads/node_"+str(node_id)+"/"+out))
+			print "producing file " + out 
+			print "moving decoded image file into " + os.path.expanduser(_folder_path+"images")
+			os.rename(out, os.path.expanduser(_folder_path+"images/"+out))  
 			print "done"	
 
 	except subprocess.CalledProcessError:
 		print "launching image decoding failed!"
-		
-	sys.stdout.flush()
-	
+
 #------------------------------------------------------------
 #for managing the input data when we can have aes encryption
 #------------------------------------------------------------
@@ -668,7 +568,6 @@ def fillLinebuf(n):
 # CHANGE HERE THE VARIOUS PATHS FOR YOUR LOG FILES
 #////////////////////////////////////////////////////////////
 _folder_path = "/home/pi/Dropbox/LoRa-test/"
-_web_folder_path = "/var/www/html/"
 _telemetrylog_filename = _folder_path+"telemetry_"+str(_gwid)+".log"
 _imagelog_filename = _folder_path+"image_"+str(_gwid)+".log"
 
@@ -745,11 +644,8 @@ if (_gw_downlink):
 			print downlink_request.replace('\n','')
 	else:
 		print "post downlink: none existing downlink-post-queued.txt"			
-
-	print "Loading lib to compute downlink MIC"
-	from loraWAN import loraWAN_get_MIC
-
-	print "Starting thread to check for downlink requests every %d seconds" % _gw_downlink
+	
+	print "Starting thread to check for downlink requests"
 	sys.stdout.flush()
 	t_downlink = threading.Thread(target=downlink_target)
 	t_downlink.daemon = True
@@ -758,23 +654,12 @@ if (_gw_downlink):
 
 #status feature
 if (_gw_status):
-	print "Starting thread to perform periodic gw status/tasks"
+	print "Starting thread to report gw status"
 	sys.stdout.flush()
 	t_status = threading.Thread(target=status_target)
 	t_status.daemon = True
 	t_status.start()
 	time.sleep(1)	
-	
-#copy post_processing feature
-#TODO: integrate copy post_processing feature into periodic status/tasks?
-	
-if (_gw_copy_post_processing):
-	print "Starting thread to copy post_processing.log"
-	sys.stdout.flush()
-	t_status = threading.Thread(target=copy_post_processing_target)
-	t_status.daemon = True
-	t_status.start()
-	time.sleep(1)
 
 print ''	
 print "Current working directory: "+os.getcwd()
@@ -848,8 +733,8 @@ while True:
 			ptypestr="N/A"
 			if ((ptype & 0xF0)==PKT_TYPE_DATA):
 				ptypestr="DATA"
-				if (ptype & PKT_FLAG_DATA_DOWNLINK)==PKT_FLAG_DATA_DOWNLINK:
-					ptypestr = ptypestr + " DOWNLINK"
+				if (ptype & PKT_FLAG_DATA_ISBINARY)==PKT_FLAG_DATA_ISBINARY:
+					ptypestr = ptypestr + " IS_BINARY"
 				if (ptype & PKT_FLAG_DATA_WAPPKEY)==PKT_FLAG_DATA_WAPPKEY:
 					ptypestr = ptypestr + " WAPPKEY"
 				if (ptype & PKT_FLAG_DATA_ENCRYPTED)==PKT_FLAG_DATA_ENCRYPTED:
@@ -857,7 +742,7 @@ while True:
 				if (ptype & PKT_FLAG_ACK_REQ)==PKT_FLAG_ACK_REQ:
 					ptypestr = ptypestr + " ACK_REQ"														
 			if ((ptype & 0xF0)==PKT_TYPE_ACK):
-				ptypestr="ACK"
+				ptypestr="ACK"					
 			src=arr[2]
 			seq=arr[3]
 			datalen=arr[4]
@@ -874,48 +759,21 @@ while True:
 			#
 			for downlink_request in pending_downlink_requests:
 				request_json=json.loads(downlink_request)
-				if (request_json["dst"]==0) or (src == request_json["dst"]):
+				if src == request_json["dst"]:
 					print "post downlink: receive from %d with pending request" % src
-					if (request_json["dst"]==0):
-						print "in broadcast mode"
-					else:
-						print "in unicast mode"	
 					print "post downlink: downlink data is \"%s\"" % request_json["data"]
-					print "post downlink: generate "+_gw_downlink_file+" from entry"
-					print downlink_request.replace('\n','')
-					
-					#generate the MIC corresponding to the clear data and the destination device address
-					#it is possible to have a broadcast address but since the only device that is listening 
-					#is the one that has sent a packet, there is little interest in doing so
-					#so currently, we use the sending device's address to compute the MIC
-					MIC=loraWAN_get_MIC(src,request_json["data"])
-					#add the 4 byte MIC information into the json line
-					request_json['MIC0']=hex(MIC[0])
-					request_json['MIC1']=hex(MIC[1])
-					request_json['MIC2']=hex(MIC[2])
-					request_json['MIC3']=hex(MIC[3])
-					
-					downlink_json=[]
-					downlink_json.append(request_json)
-					
+					print "post downlink: generate "+_gw_downlink_file
+					print downlink_request
 					f = open(os.path.expanduser(_gw_downlink_file),"a")
-					
-					print "post downlink: write"
-					for downlink_json_line in downlink_json:
-						#print downlink_json_line
-						print json.dumps(downlink_json_line)
-						f.write(json.dumps(downlink_json_line)+'\n')
-					
+					f.write(downlink_request)
 					f.close()
-					
 					pending_downlink_requests.remove(downlink_request)
-					
 					#update downlink-post-queued.txt
 					f = open(os.path.expanduser(_post_downlink_queued_file),"w")
 					for downlink_request in pending_downlink_requests:
 						f.write("%s" % downlink_request)
 					#TODO: should we write all pending request for this node
-					#or only the first one that we found?
+					#or only the first one?
 					#currently, we do only the first one					
 					break;
 	
@@ -955,9 +813,8 @@ while True:
 				
 				if _use_sms_alert:
 					print "post_processing_gw.py sends SMS indicating that gateway has reset radio module..."
-					success = libSMS.send_sms(sm, "Gateway "+_gwid+" has reset its radio module", contact_sms)
-					if (success):
-						print "Sending SMS done"
+					send_sms("Gateway "+_gwid+" has reset its radio module")
+					print "Sending SMS done"		
 						
 		continue
 
@@ -1002,11 +859,6 @@ while True:
 
 				ldata = getAllLine()
 				
-				if (dateutil_tz==True):
-					#replacing tdata to get time zone information when uploading to clouds
-					localdt = datetime.datetime.now(dateutil.tz.tzlocal())
-					tdata = localdt.replace(microsecond=0).isoformat()
-				
 				print "number of enabled clouds is %d" % len(_enabled_clouds)	
 				
 				#loop over all enabled clouds to upload data
@@ -1019,14 +871,14 @@ while True:
 						cloud_script=_enabled_clouds[cloud_index]
 						print "uploading with "+cloud_script
 						sys.stdout.flush()
-						cmd_arg=cloud_script+" \""+ldata.replace('\n','').replace('\0','')+"\""+" \""+pdata.replace('\n','')+"\""+" \""+rdata.replace('\n','')+"\""+" \""+tdata.replace('\n','')+"\""+" \""+_gwid.replace('\n','')+"\""
+						cmd_arg=cloud_script+" \""+ldata.replace('\n','')+"\""+" \""+pdata.replace('\n','')+"\""+" \""+rdata.replace('\n','')+"\""+" \""+tdata.replace('\n','')+"\""+" \""+_gwid.replace('\n','')+"\""
 					except UnicodeDecodeError, ude:
 						print ude
 					else:
 						print cmd_arg
-						sys.stdout.flush()
 						try:
 							os.system(cmd_arg)
+							#print "testing ........................"
 						except:
 							print "Error when uploading data to the cloud"	
 
@@ -1048,24 +900,19 @@ while True:
 
 		continue
 	
-	#handle low-level gateway data
-	if (ch == LL_PREFIX_1):
+	#handle binary prefixes
+	#if (ch == '\xFF' or ch == '+'):
+	if (ch == '\xFF'):
 	
 		print "got first framing byte"
 		ch=getSingleChar()	
 		
-		#data from low-level LoRa gateway?		
-		if (ch == LL_PREFIX_LORA):
+		#data prefix for non-encrypted data
+		#if (ch == '\xFE' or ch == '+'):			
+		if (ch == '\xFE'):
 			#the data prefix is inserted by the gateway
 			#do not modify, unless you know what you are doing and that you modify lora_gateway (comment WITH_DATA_PREFIX)
-			print "--> got LoRa data prefix"
-			radio_type=LORA_RADIO
-			
-			#if SNR < -20:
-			#	print "--> SNR too low, discarding data"
-			#	sys.stdin.readline()
-			#	continue	
-							
+			print "--> got data prefix"
 			_hasRadioData=True
 			
 			#we actually need to use DATA_PREFIX in order to differentiate data from radio coming to the post-processing stage
@@ -1078,10 +925,10 @@ while True:
 			#if we have raw output from gw, then try to determine which kind of packet it is
 			#
 			if (_rawFormat==1):
-				print "raw format from LoRa gateway"
+				print "raw format from gateway"
 				ch=getSingleChar()
 				
-				#probably our modified Libelium header where the destination (i.e. 1) is the gateway
+				#probably our modified Libelium header where the destination (1) is the gateway
 				#dissect our modified Libelium format
 				if ord(ch)==1:			
 					dst=ord(ch)
@@ -1092,15 +939,12 @@ while True:
 					#now we read datalen-4 (the header length) bytes in our line buffer
 					fillLinebuf(datalen-HEADER_SIZE)
 					datalen=datalen-HEADER_SIZE
-					pdata="%d,%d,%d,%d,%d,%d,%d" % (dst,ptype,src,seq,datalen,SNR,RSSI)
-					print "update ctrl pkt info (^p): "+pdata				
+					pdata="%d,%d,%d,%d,%d,%d,%d" % (dst,ptype,src,seq,datalen,SNR,RSSI)				
 				
 				#LoRaWAN uses the MHDR(1B)
 				#----------------------------
 				#| 7  6  5 | 4  3  2 | 1  0 |
 				#----------------------------
-				#  0  1  0   0  0  0   0  0		unconfirmed data up
-				#  1  0  0   0  0  0   0  0		confirmed data up 
 				#   MType      RFU     major
 				#
 				#the main MType is unconfirmed data up b010 or confirmed data up b100
@@ -1113,36 +957,17 @@ while True:
 					fillLinebuf(datalen-1)
 					lorapktstr=ch+getAllLine()
 					
-					lorapkt=[]
-					for i in range (0,len(lorapktstr)):
-						lorapkt.append(ord(lorapktstr[i]))
+					if _local_aes==1:	
 						
-					#you can uncomment/comment this display if you want
-					print [hex(x) for x in lorapkt]
-					
-					datalen=datalen-LORAWAN_HEADER_SIZE
-					
-					src = lorapkt[4]*256*256*256
-					src += lorapkt[3]*256*256
-					src += lorapkt[2]*256
-					src += lorapkt[1]
-					
-					seq=lorapkt[7]*256+lorapkt[6]
-					
-					#just to print the src in 0x01020304 form
-					pdata="%d,%d,%s,%d,%d,%d,%d" % (256,ord(ch),"0x%0.8X" % src,seq,datalen,SNR,RSSI)
-					print "update ctrl pkt info (^p): "+pdata
-					#internally, we convert in int
-					pdata="%d,%d,%d,%d,%d,%d,%d" % (256,ord(ch),src,seq,datalen,SNR,RSSI)					
-					
-					if _local_aes==1:							
+						lorapkt=[]
+						for i in range (0,len(lorapktstr)):
+							lorapkt.append(ord(lorapktstr[i]))
+							
+						#you can comment this display if you want
+						#print [hex(x) for x in lorapkt]
 						
 						from loraWAN import loraWAN_process_pkt
-						try:
-							plain_payload=loraWAN_process_pkt(lorapkt)
-						except:
-							print "### unexpected decryption error ###"
-							plain_payload="###BADMIC###"
+						plain_payload=loraWAN_process_pkt(lorapkt)
 						
 						if plain_payload=="###BADMIC###":
 							print plain_payload
@@ -1160,8 +985,7 @@ while True:
 							#	print plain_payload
 							_linebuf = plain_payload
 							_has_linebuf=1
-							_hasClearData=1							
-							
+							_hasClearData=1
 					else:
 						print "--> DATA encrypted: local aes not activated"
 						lorapktstr_b64=base64.b64encode(lorapktstr)
@@ -1177,24 +1001,15 @@ while True:
 							#
 							for cloud_index in range(0,len(_cloud_for_lorawan_encrypted_data)):
 								
-								try:
-									print "--> LoRaWAN encrypted cloud[%d]" % cloud_index
-									cloud_script=_cloud_for_lorawan_encrypted_data[cloud_index]
-									print "uploading with "+cloud_script
-									sys.stdout.flush()
-									cmd_arg=cloud_script+" \""+lorapktstr_b64.replace('\n','')+"\""+" \""+pdata.replace('\n','')+"\""+" \""+rdata.replace('\n','')+"\""+" \""+tdata.replace('\n','')+"\""+" \""+_gwid.replace('\n','')+"\""
-								except UnicodeDecodeError, ude:
-									print ude
-								else:
-									print cmd_arg
-									sys.stdout.flush()
-									try:
-										os.system(cmd_arg)
-									except:
-										print "Error when uploading data to LoRaWAN encrypted cloud"								
-								
-							print "--> LoRaWAN encrypted cloud end"		
-							
+								print "--> LoRaWAN encrypted cloud[%d]" % cloud_index
+								cloud_script=_cloud_for_lorawan_encrypted_data[cloud_index]
+								print "uploading with "+cloud_script
+								sys.stdout.flush()
+								cmd_arg=cloud_script+" \""+lorapktstr_b64.replace('\n','')+"\""+" \""+pdata.replace('\n','')+"\""+" \""+rdata.replace('\n','')+"\""+" \""+tdata.replace('\n','')+"\""+" \""+_gwid.replace('\n','')+"\""
+								print cmd_arg
+								os.system(cmd_arg) 
+							print "--> LoRaWAN encrypted cloud end"					
+						
 					continue	
 					
 			else:								
@@ -1216,11 +1031,7 @@ while True:
 							lorapkt.append(ord(lorapktstr[i]))
 						
 						from loraWAN import loraWAN_process_pkt
-						try:
-							plain_payload=loraWAN_process_pkt(lorapkt)
-						except:
-							print "### unexpected decryption error ###"
-							plain_payload="###BADMIC###"
+						plain_payload=loraWAN_process_pkt(lorapkt)
 						
 						if plain_payload=="###BADMIC###":
 							print plain_payload
@@ -1239,12 +1050,7 @@ while True:
 							#	print plain_payload
 							_linebuf = plain_payload
 							_has_linebuf=1
-							_hasClearData=1
-							
-							#remove the data encrypted flag
-							ptype = ptype & (~PKT_FLAG_DATA_ENCRYPTED)
-							pdata="%d,%d,%d,%d,%d,%d,%d" % (dst,ptype,src,seq,datalen,SNR,RSSI)	
-							print '--> changed packet type to clear data' 					
+							_hasClearData=1						
 						
 				else:
 						print "--> DATA encrypted: local aes not activated"
@@ -1264,22 +1070,13 @@ while True:
 							#							
 							for cloud_index in range(0,len(_cloud_for_encrypted_data)):
 								
-								try:
-									print "--> encrypted cloud[%d]" % cloud_index
-									cloud_script=_cloud_for_encrypted_data[cloud_index]
-									print "uploading with "+cloud_script
-									sys.stdout.flush()
-									cmd_arg=cloud_script+" \""+lorapktstr_b64.replace('\n','')+"\""+" \""+pdata.replace('\n','')+"\""+" \""+rdata.replace('\n','')+"\""+" \""+tdata.replace('\n','')+"\""+" \""+_gwid.replace('\n','')+"\""
-								except UnicodeDecodeError, ude:
-									print ude
-								else:
-									print cmd_arg
-									sys.stdout.flush()
-									try:
-										os.system(cmd_arg)
-									except:
-										print "Error when uploading data to encrypted cloud"
-											
+								print "--> encrypted cloud[%d]" % cloud_index
+								cloud_script=_cloud_for_encrypted_data[cloud_index]
+								print "uploading with "+cloud_script
+								sys.stdout.flush()
+								cmd_arg=cloud_script+" \""+lorapktstr_b64.replace('\n','')+"\""+" \""+pdata.replace('\n','')+"\""+" \""+rdata.replace('\n','')+"\""+" \""+tdata.replace('\n','')+"\""+" \""+_gwid.replace('\n','')+"\""
+								print cmd_arg
+								os.system(cmd_arg) 
 							print "--> encrypted cloud end"	
 			else:
 				_hasClearData=1
@@ -1295,17 +1092,19 @@ while True:
 				
 				print "app key is ",
 				print " ".join("0x{:02x}".format(ord(c)) for c in the_app_key)
-
-				if _wappkey==1:
-					if the_app_key in key_AppKey.app_key_list:
-						print "in app key list"				
+				
+				if the_app_key in app_key_list:
+					print "in app key list"
+					if _wappkey==1:
 						_validappkey=1
-					else:
-						print "not in app key list"
+				else:		
+					print "not in app key list"
+					if _wappkey==1:
 						_validappkey=0
-				else:
-					print "app key disabled"
-					_validappkey=1				
+					else:	
+						#we do not check for app key
+						_validappkey=1
+						print "but app key disabled"				
 				
 			continue	
 					
@@ -1333,7 +1132,7 @@ while True:
 			else:
 				#new image packet from this node
 				nodeL.append(src_addr)
-				filename =(_folder_path+"images/ucam_%d-node_%.4d-cam_%d-Q%d.dat" % (imgSN,src_addr,cam_id,Q))
+				filename =(_folder_path+"images/ucam_%d-node#%.4d-cam#%d-Q%d.dat" % (imgSN,src_addr,cam_id,Q))
 				print "first pkt from node %d" % src_addr
 				print "creating file %s" % filename
 				theFile=open(os.path.expanduser(filename),"w")
@@ -1345,7 +1144,7 @@ while True:
 				qualityA.update({src_addr:Q})
 				camidA.update({src_addr:cam_id})
 				imgSN=imgSN+1
-				t = Timer(90, image_timeout)
+				t = Timer(60, image_timeout)
 				t.start()
 				#log only the first packet and the filename
 				f=open(os.path.expanduser(_imagelog_filename),"a")
